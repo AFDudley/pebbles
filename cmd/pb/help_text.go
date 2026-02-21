@@ -498,25 +498,36 @@ const primeContext = `# Pebbles Workflow Context
 - ` + "`pb list`" + ` - List open/in_progress issues (default hides closed)
 - ` + "`pb list --all`" + ` - Show all issues including closed
 - ` + "`pb list --status in_progress`" + ` - Your active work
+- ` + "`pb list --type bug,feature`" + ` - Filter by type
+- ` + "`pb list --priority P0,P1`" + ` - Filter by priority
+- ` + "`pb list --blocked`" + ` - Show blocked issues
+- ` + "`pb list --stale`" + ` - Show issues with no recent activity
 - ` + "`pb show <id>`" + ` - Detailed issue view with dependencies
+- ` + "`pb log`" + ` - Show event history (` + "`--limit N`" + `, ` + "`--since YYYY-MM-DD`" + `)
 
 ### Creating & Updating
-- ` + "`pb create --title=\"...\" --type=task|bug|feature|epic --priority=P2`" + ` - New issue
+- ` + "`pb create --title=\"...\" --description=\"...\" --type=task|bug|feature|epic --priority=P2`" + ` - New issue
   - Priority: P0-P4 (or 0-4). P0=critical, P2=medium (default), P4=backlog
 - ` + "`pb update <id> --status=in_progress`" + ` - Claim work
+- ` + "`pb update <id> --title=\"...\" --description=\"...\" --type=... --priority=P1`" + ` - Update fields
+- ` + "`pb update <id> --parent <epic-id>`" + ` - Set parent (use ` + "`--parent none`" + ` to clear)
 - ` + "`pb close <id>`" + ` - Mark complete
 - ` + "`pb close <id1> <id2> ...`" + ` - Close multiple issues at once
+- ` + "`pb reopen <id>`" + ` - Reopen a closed issue
 - ` + "`pb comment <id> --body \"...\"`" + ` - Add a comment
 
 ### Dependencies & Hierarchy
 - ` + "`pb dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
 - ` + "`pb dep add --type parent-child <child> <parent>`" + ` - Create epic/subtask hierarchy
+- ` + "`pb dep rm <issue> <depends-on>`" + ` - Remove a dependency
 - ` + "`pb dep tree <id>`" + ` - Visualize dependency tree
-- ` + "`pb list --blocked`" + ` - Show blocked issues
 
 ### Git Integration
 - ` + "`pb sync`" + ` - Commit pebbles events to git
 - ` + "`pb sync --push`" + ` - Commit and push
+
+### JSON Output
+- Add ` + "`--json`" + ` to ` + "`pb list`" + `, ` + "`pb show`" + `, or ` + "`pb ready`" + ` for structured output
 
 ## Common Workflows
 
@@ -535,7 +546,7 @@ git add . && git commit -m "..."            # Commit code + pebbles changes
 
 **Creating dependent work:**
 ` + "```" + `
-pb create --title="Implement feature X" --type=feature
+pb create --title="Implement feature X" --type=feature --description="..."
 pb create --title="Write tests for X" --type=task
 pb dep add <tests-id> <feature-id>          # Tests depend on feature
 ` + "```" + `
