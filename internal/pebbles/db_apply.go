@@ -12,6 +12,7 @@ func resetSchema(db *sql.DB) error {
 		"DROP TABLE IF EXISTS deps",
 		"DROP TABLE IF EXISTS issues",
 		"DROP TABLE IF EXISTS renames",
+		"DROP TABLE IF EXISTS cache_meta",
 	}
 	for _, query := range queries {
 		if _, err := db.Exec(query); err != nil {
@@ -44,6 +45,10 @@ func ensureSchema(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS renames (
 			old_id TEXT PRIMARY KEY,
 			new_id TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS cache_meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL
 		)`,
 	}
 	// Execute each schema statement in order.

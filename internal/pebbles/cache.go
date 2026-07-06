@@ -1,16 +1,24 @@
 package pebbles
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-// EnsureCache rebuilds the cache if the events log is newer than the DB.
+// cacheMetaEventsHash is the cache_meta key recording the digest of the events
+// log the cache was last built from. See needsRebuild.
+const cacheMetaEventsHash = "events_hash"
+
+// EnsureCache rebuilds the cache when it no longer matches the events log.
 func EnsureCache(root string) error {
 	needs, err := needsRebuild(EventsPath(root), DBPath(root))
 	if err != nil {
@@ -19,19 +27,17 @@ func EnsureCache(root string) error {
 	if needs {
 		return RebuildCache(root)
 	}
-	schemaNeeds, err := needsSchemaUpdate(DBPath(root))
-	if err != nil {
-		return err
-	}
-	if schemaNeeds {
-		return RebuildCache(root)
-	}
 	return nil
 }
 
 // RebuildCache recreates the SQLite cache from the event log.
 func RebuildCache(root string) error {
 	events, err := LoadEvents(root)
+	if err != nil {
+		return err
+	}
+	// Digest the log up front so the cache records exactly what it replayed.
+	hash, err := hashEventsFile(EventsPath(root))
 	if err != nil {
 		return err
 	}
@@ -52,69 +58,91 @@ func RebuildCache(root string) error {
 	if err := applyEvents(db, events); err != nil {
 		return err
 	}
+	// Record the digest of the events log this cache was built from. Written
+	// last so a partially-built (e.g. crash/rollback) cache lacks the marker
+	// and is treated as stale on the next open.
+	if err := storeEventsHash(db, hash); err != nil {
+		return err
+	}
 	return nil
 }
 
-// needsRebuild compares timestamps to decide if the cache is stale.
+// needsRebuild reports whether the cache no longer matches the events log.
+//
+// Staleness is derived from CONTENT, not file mtime: the cache stores the
+// digest of the events log it was built from, and a rebuild is required when
+// that digest is absent (missing/old-schema/partial cache) or differs from the
+// current log's digest. mtime is unreliable — an out-of-band write (git
+// checkout/merge, a concurrent writer, or a PEBBLES_DIR shared across
+// worktrees) can leave the log's mtime not-newer than the db while its content
+// diverges, which a timestamp comparison silently misses (pebble so-fe0).
 func needsRebuild(eventsPath, dbPath string) (bool, error) {
-	eventsInfo, err := os.Stat(eventsPath)
-	if err != nil {
-		return false, fmt.Errorf("stat events log: %w", err)
-	}
-	dbInfo, err := os.Stat(dbPath)
-	if err != nil {
+	if _, err := os.Stat(dbPath); err != nil {
 		// Missing cache means a rebuild is required.
 		if os.IsNotExist(err) {
 			return true, nil
 		}
 		return false, fmt.Errorf("stat cache: %w", err)
 	}
-	return eventsInfo.ModTime().After(dbInfo.ModTime()), nil
-}
-
-// needsSchemaUpdate checks whether the cache schema is missing expected columns.
-func needsSchemaUpdate(dbPath string) (bool, error) {
-	// Open the cache database and inspect the deps table schema.
+	wantHash, err := hashEventsFile(eventsPath)
+	if err != nil {
+		return false, err
+	}
 	db, err := openDB(dbPath)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = db.Close() }()
-	hasDepType, err := depsTableHasColumn(db, "dep_type")
+	gotHash, err := loadEventsHash(db)
 	if err != nil {
 		return false, err
 	}
-	// Trigger a rebuild if the new column is missing.
-	return !hasDepType, nil
+	return gotHash != wantHash, nil
 }
 
-// depsTableHasColumn reports whether the deps table contains a column name.
-func depsTableHasColumn(db *sql.DB, name string) (bool, error) {
-	// PRAGMA table_info returns one row per column.
-	rows, err := db.Query("PRAGMA table_info(deps)")
+// hashEventsFile returns a hex digest of the events log content.
+func hashEventsFile(eventsPath string) (string, error) {
+	data, err := os.ReadFile(eventsPath)
 	if err != nil {
-		return false, fmt.Errorf("deps schema: %w", err)
+		return "", fmt.Errorf("read events log: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	// Scan column metadata looking for the requested name.
-	for rows.Next() {
-		var cid int
-		var colName string
-		var colType string
-		var notnull int
-		var dflt sql.NullString
-		var pk int
-		if err := rows.Scan(&cid, &colName, &colType, &notnull, &dflt, &pk); err != nil {
-			return false, fmt.Errorf("scan deps schema: %w", err)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// storeEventsHash records the events-log digest for the built cache.
+func storeEventsHash(db *sql.DB, hash string) error {
+	if _, err := db.Exec(
+		"INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
+		cacheMetaEventsHash,
+		hash,
+	); err != nil {
+		return fmt.Errorf("store events hash: %w", err)
+	}
+	return nil
+}
+
+// loadEventsHash reads the recorded events-log digest, or "" when absent.
+func loadEventsHash(db *sql.DB) (string, error) {
+	row := db.QueryRow("SELECT value FROM cache_meta WHERE key = ?", cacheMetaEventsHash)
+	var hash string
+	if err := row.Scan(&hash); err != nil {
+		// No cache_meta row (or table) means an old/partial cache: rebuild.
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
 		}
-		if colName == name {
-			return true, nil
+		if isNoSuchTable(err) {
+			return "", nil
 		}
+		return "", fmt.Errorf("load events hash: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("deps schema rows: %w", err)
-	}
-	return false, nil
+	return hash, nil
+}
+
+// isNoSuchTable reports whether err is SQLite's missing-table error, which an
+// old cache built before the cache_meta table existed will produce.
+func isNoSuchTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }
 
 // openDB opens a SQLite database at the given path.
