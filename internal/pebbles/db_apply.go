@@ -7,7 +7,7 @@ import (
 )
 
 // resetSchema drops the issue and dependency tables.
-func resetSchema(db *sql.DB) error {
+func resetSchema(db sqlExecutor) error {
 	queries := []string{
 		"DROP TABLE IF EXISTS deps",
 		"DROP TABLE IF EXISTS issues",
@@ -23,7 +23,7 @@ func resetSchema(db *sql.DB) error {
 }
 
 // ensureSchema creates the issue and dependency tables.
-func ensureSchema(db *sql.DB) error {
+func ensureSchema(db sqlExecutor) error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS issues (
 			id TEXT PRIMARY KEY,
@@ -61,7 +61,7 @@ func ensureSchema(db *sql.DB) error {
 }
 
 // applyEvents replays events into the SQLite cache.
-func applyEvents(db *sql.DB, events []Event) error {
+func applyEvents(db sqlExecutor, events []Event) error {
 	for _, event := range events {
 		if err := applyEvent(db, event); err != nil {
 			return err
@@ -71,7 +71,7 @@ func applyEvents(db *sql.DB, events []Event) error {
 }
 
 // applyEvent applies a single event into the SQLite cache.
-func applyEvent(db *sql.DB, event Event) error {
+func applyEvent(db sqlExecutor, event Event) error {
 	switch event.Type {
 	case EventTypeCreate:
 		return applyCreate(db, event)
@@ -124,7 +124,7 @@ func applyEvent(db *sql.DB, event Event) error {
 	}
 }
 
-func applyTitleUpdated(db *sql.DB, event Event) error {
+func applyTitleUpdated(db sqlExecutor, event Event) error {
 	title := strings.TrimSpace(event.Payload["title"])
 	if title == "" {
 		return fmt.Errorf("title_updated event missing title")
@@ -142,7 +142,7 @@ func applyTitleUpdated(db *sql.DB, event Event) error {
 }
 
 // resolveEventIssueID returns a copy of the event with a resolved IssueID.
-func resolveEventIssueID(db *sql.DB, event Event) (Event, error) {
+func resolveEventIssueID(db sqlExecutor, event Event) (Event, error) {
 	resolvedID, err := resolveIssueID(db, event.IssueID)
 	if err != nil {
 		return Event{}, err
@@ -152,7 +152,7 @@ func resolveEventIssueID(db *sql.DB, event Event) (Event, error) {
 }
 
 // resolveEventDependencyIDs resolves dependency IDs to their current values.
-func resolveEventDependencyIDs(db *sql.DB, event Event) (Event, error) {
+func resolveEventDependencyIDs(db sqlExecutor, event Event) (Event, error) {
 	resolvedIssueID, err := resolveIssueID(db, event.IssueID)
 	if err != nil {
 		return Event{}, err
@@ -176,7 +176,7 @@ func resolveEventDependencyIDs(db *sql.DB, event Event) (Event, error) {
 }
 
 // applyCreate inserts a new issue from a create event.
-func applyCreate(db *sql.DB, event Event) error {
+func applyCreate(db sqlExecutor, event Event) error {
 	title, ok := event.Payload["title"]
 	if !ok || title == "" {
 		return fmt.Errorf("create event missing title")
@@ -208,7 +208,7 @@ func applyCreate(db *sql.DB, event Event) error {
 }
 
 // applyRename renames an issue ID and updates dependencies.
-func applyRename(db *sql.DB, event Event) error {
+func applyRename(db sqlExecutor, event Event) error {
 	newID := event.Payload["new_id"]
 	if newID == "" {
 		return fmt.Errorf("rename event missing new_id")
@@ -248,7 +248,7 @@ func applyRename(db *sql.DB, event Event) error {
 }
 
 // applyStatus updates an issue status from a status update event.
-func applyStatus(db *sql.DB, event Event) error {
+func applyStatus(db sqlExecutor, event Event) error {
 	status := event.Payload["status"]
 	if status == "" {
 		return fmt.Errorf("status event missing status")
@@ -280,7 +280,7 @@ func applyStatus(db *sql.DB, event Event) error {
 }
 
 // applyUpdate updates issue fields from an update event.
-func applyUpdate(db *sql.DB, event Event) error {
+func applyUpdate(db sqlExecutor, event Event) error {
 	var updates []string
 	var args []any
 	if issueType, ok := event.Payload["type"]; ok {
@@ -309,7 +309,7 @@ func applyUpdate(db *sql.DB, event Event) error {
 }
 
 // applyClose closes an issue from a close event.
-func applyClose(db *sql.DB, event Event) error {
+func applyClose(db sqlExecutor, event Event) error {
 	// Close the issue and stamp updated_at/closed_at.
 	result, err := db.Exec(
 		"UPDATE issues SET status = ?, updated_at = ?, closed_at = ? WHERE id = ?",
@@ -325,7 +325,7 @@ func applyClose(db *sql.DB, event Event) error {
 }
 
 // applyComment validates comment events without mutating the cache.
-func applyComment(db *sql.DB, event Event) error {
+func applyComment(db sqlExecutor, event Event) error {
 	body := strings.TrimSpace(event.Payload["body"])
 	if body == "" {
 		return fmt.Errorf("comment event missing body")
@@ -338,7 +338,7 @@ func applyComment(db *sql.DB, event Event) error {
 }
 
 // applyDepAdd inserts a dependency from a dep_add event.
-func applyDepAdd(db *sql.DB, event Event) error {
+func applyDepAdd(db sqlExecutor, event Event) error {
 	dependsOn := event.Payload["depends_on"]
 	if dependsOn == "" {
 		return fmt.Errorf("dep_add event missing depends_on")
@@ -365,7 +365,7 @@ func applyDepAdd(db *sql.DB, event Event) error {
 }
 
 // applyDepRemove removes a dependency from a dep_rm event.
-func applyDepRemove(db *sql.DB, event Event) error {
+func applyDepRemove(db sqlExecutor, event Event) error {
 	dependsOn := event.Payload["depends_on"]
 	if dependsOn == "" {
 		return fmt.Errorf("dep_rm event missing depends_on")
@@ -392,7 +392,7 @@ func applyDepRemove(db *sql.DB, event Event) error {
 }
 
 // ensureIssueExists verifies a referenced issue exists.
-func ensureIssueExists(db *sql.DB, issueID string) error {
+func ensureIssueExists(db sqlExecutor, issueID string) error {
 	exists, err := issueExists(db, issueID)
 	if err != nil {
 		return err
@@ -404,7 +404,7 @@ func ensureIssueExists(db *sql.DB, issueID string) error {
 }
 
 // updateIssueID swaps issue IDs and stamps updated_at.
-func updateIssueID(db *sql.DB, oldID, newID, timestamp string) error {
+func updateIssueID(db sqlExecutor, oldID, newID, timestamp string) error {
 	result, err := db.Exec(
 		"UPDATE issues SET id = ?, updated_at = ? WHERE id = ?",
 		newID,
@@ -418,7 +418,7 @@ func updateIssueID(db *sql.DB, oldID, newID, timestamp string) error {
 }
 
 // updateDepsForRename rewrites dependency edges for a renamed issue.
-func updateDepsForRename(db *sql.DB, oldID, newID string) error {
+func updateDepsForRename(db sqlExecutor, oldID, newID string) error {
 	if _, err := db.Exec("UPDATE deps SET issue_id = ? WHERE issue_id = ?", newID, oldID); err != nil {
 		return fmt.Errorf("rename dependency issue_id: %w", err)
 	}
@@ -429,7 +429,7 @@ func updateDepsForRename(db *sql.DB, oldID, newID string) error {
 }
 
 // upsertRename records an issue ID rename mapping.
-func upsertRename(db *sql.DB, oldID, newID string) error {
+func upsertRename(db sqlExecutor, oldID, newID string) error {
 	if _, err := db.Exec(
 		"INSERT OR REPLACE INTO renames (old_id, new_id) VALUES (?, ?)",
 		oldID,

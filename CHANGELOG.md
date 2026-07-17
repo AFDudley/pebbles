@@ -13,6 +13,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 
 ### Fixed
+- Concurrent access no longer errors with `database is locked (SQLITE_BUSY)`.
+  SQLite is opened with a 5s `busy_timeout`, so a contended read or write waits
+  for the lock instead of failing immediately (so-b08).
+- `pb show` and other reads during an in-flight write no longer return a
+  transient `sql: no rows in result set`. The cache rebuild now commits as one
+  transaction, so a reader never observes it mid-replay (so-b08).
 
 ## [0.4.0] - 2026-01-21
 

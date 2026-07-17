@@ -18,6 +18,9 @@ import (
 // log the cache was last built from. See needsRebuild.
 const cacheMetaEventsHash = "events_hash"
 
+// busyTimeoutMillis is how long SQLite waits for a held lock before erroring.
+const busyTimeoutMillis = 5000
+
 // EnsureCache rebuilds the cache when it no longer matches the events log.
 func EnsureCache(root string) error {
 	needs, err := needsRebuild(EventsPath(root), DBPath(root))
@@ -31,16 +34,30 @@ func EnsureCache(root string) error {
 }
 
 // RebuildCache recreates the SQLite cache from the event log.
+//
+// The whole replacement — drop, recreate, replay, digest — commits as ONE
+// transaction. It replaces every row in the cache, so a reader that observed it
+// midway would see dropped or half-populated tables and answer "no rows" for an
+// issue that plainly exists (pebble so-b08's transient empty scan). Inside a
+// transaction there is no midway: a concurrent reader sees either the whole
+// previous cache or the whole new one, and a rebuild that fails rolls back
+// rather than leaving the cache destroyed.
 func RebuildCache(root string) error {
-	events, err := LoadEvents(root)
+	// Derive the events and their digest from a SINGLE read of the log, so the
+	// digest describes exactly what was replayed. Reading the log twice lets a
+	// concurrent append land in between: the cache would then record a digest
+	// covering an event it never applied, and needsRebuild — which compares
+	// that digest against the log — would call the cache fresh and serve the
+	// missing event to nobody until the next write.
+	data, err := os.ReadFile(EventsPath(root))
+	if err != nil {
+		return fmt.Errorf("read events log: %w", err)
+	}
+	events, err := decodeEvents(data)
 	if err != nil {
 		return err
 	}
-	// Digest the log up front so the cache records exactly what it replayed.
-	hash, err := hashEventsFile(EventsPath(root))
-	if err != nil {
-		return err
-	}
+	hash := hashEvents(data)
 	// Normalize event order before replay.
 	sortEvents(events)
 	db, err := openDB(DBPath(root))
@@ -48,21 +65,30 @@ func RebuildCache(root string) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin rebuild: %w", err)
+	}
+	// Roll back unless the commit below succeeds; a rolled-back rebuild leaves
+	// the previous cache intact and its digest unchanged, so the next open
+	// simply rebuilds again.
+	defer func() { _ = tx.Rollback() }()
 	// Recreate schema and replay the event log.
-	if err := resetSchema(db); err != nil {
+	if err := resetSchema(tx); err != nil {
 		return err
 	}
-	if err := ensureSchema(db); err != nil {
+	if err := ensureSchema(tx); err != nil {
 		return err
 	}
-	if err := applyEvents(db, events); err != nil {
+	if err := applyEvents(tx, events); err != nil {
 		return err
 	}
-	// Record the digest of the events log this cache was built from. Written
-	// last so a partially-built (e.g. crash/rollback) cache lacks the marker
-	// and is treated as stale on the next open.
-	if err := storeEventsHash(db, hash); err != nil {
+	// Record the digest of the events log this cache was built from.
+	if err := storeEventsHash(tx, hash); err != nil {
 		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuild: %w", err)
 	}
 	return nil
 }
@@ -106,12 +132,17 @@ func hashEventsFile(eventsPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read events log: %w", err)
 	}
+	return hashEvents(data), nil
+}
+
+// hashEvents returns a hex digest of raw events log content.
+func hashEvents(data []byte) string {
 	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 // storeEventsHash records the events-log digest for the built cache.
-func storeEventsHash(db *sql.DB, hash string) error {
+func storeEventsHash(db sqlExecutor, hash string) error {
 	if _, err := db.Exec(
 		"INSERT OR REPLACE INTO cache_meta (key, value) VALUES (?, ?)",
 		cacheMetaEventsHash,
@@ -123,7 +154,7 @@ func storeEventsHash(db *sql.DB, hash string) error {
 }
 
 // loadEventsHash reads the recorded events-log digest, or "" when absent.
-func loadEventsHash(db *sql.DB) (string, error) {
+func loadEventsHash(db sqlExecutor) (string, error) {
 	row := db.QueryRow("SELECT value FROM cache_meta WHERE key = ?", cacheMetaEventsHash)
 	var hash string
 	if err := row.Scan(&hash); err != nil {
@@ -145,13 +176,41 @@ func isNoSuchTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
 }
 
-// openDB opens a SQLite database at the given path.
+// openDB opens the SQLite cache at the given path.
+//
+// This is the ONE place pb opens a connection, so every verb — read and write
+// alike — inherits this DSN (pebble so-b08):
+//
+//   - _pragma=busy_timeout(N) makes a connection WAIT up to N ms for a lock
+//     another process holds instead of failing immediately with
+//     "database is locked (SQLITE_BUSY)". SQLite's own default is 0 (error at
+//     once), which is wrong for pb: several agents routinely share one bus, so
+//     a contended write is normal, not exceptional. The driver executes the
+//     pragma on each new connection at open (modernc.org/sqlite conn.go
+//     newConn -> applyQueryParams), and orders busy_timeout first.
+//     This is not a retry loop: SQLite's busy handler waits on the lock and the
+//     operation still fails loudly if the lock is not released within N ms.
+//
+//   - _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE, taking the write
+//     lock up front. A deferred transaction that reads first and writes later
+//     can fail SQLITE_BUSY on the upgrade even with a busy_timeout set, because
+//     SQLite cannot safely wait once another writer has changed the database
+//     underneath the reader's snapshot.
 func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_txlock=immediate", path, busyTimeoutMillis)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	return db, nil
+}
+
+// sqlExecutor is the subset of *sql.DB the replay helpers need, so the same
+// code applies events to either a database handle or a transaction.
+type sqlExecutor interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 // sortEvents orders events by timestamp with a stable fallback.

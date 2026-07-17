@@ -41,6 +41,23 @@ These are intentionally out of scope unless the project goals change:
 - `.pebbles/pebbles.db` is a derived cache for query speed.
 - The cache is rebuilt from the event log and is never committed.
 - The cache is ignored via `.pebbles/.gitignore`.
+- The cache is rebuilt from a single read of the log, inside a single
+  transaction, so the digest recorded always describes exactly what was
+  replayed and a concurrent reader never observes a half-replaced cache.
+
+### Concurrency
+
+Several agents routinely share one bus, so concurrent access is normal rather
+than exceptional. A contended read or write WAITS for the lock; it does not
+error.
+
+- SQLite is opened with `busy_timeout` set (`internal/pebbles/cache.go`
+  `openDB`, the one connection-open site), so a held lock is waited on rather
+  than failing immediately with `SQLITE_BUSY`.
+- Writes take the lock up front (`_txlock=immediate`), so a rebuild cannot fail
+  on a read-to-write upgrade.
+- Waiting is bounded: a lock held past the timeout still fails loudly. Callers
+  do not retry.
 
 ### Config
 

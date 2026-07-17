@@ -2,6 +2,7 @@ package pebbles
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,13 +33,21 @@ func LoadEvents(root string) ([]Event, error) {
 
 // readEvents reads events from a JSONL file path.
 func readEvents(path string) ([]Event, error) {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open events log: %w", err)
 	}
-	defer func() { _ = file.Close() }()
-	// Scan the file line by line to decode JSONL records.
-	scanner := bufio.NewScanner(file)
+	return decodeEvents(data)
+}
+
+// decodeEvents decodes raw JSONL events log content.
+//
+// Decoding from bytes rather than a file handle lets a caller derive both the
+// events and their digest from one read of the log, leaving no window for a
+// concurrent append to land between the two (see RebuildCache).
+func decodeEvents(data []byte) ([]Event, error) {
+	// Scan the content line by line to decode JSONL records.
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var events []Event
 	for scanner.Scan() {
 		line := scanner.Bytes()

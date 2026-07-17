@@ -8,7 +8,7 @@ import (
 )
 
 // resolveIssueID follows rename mappings to return the current issue ID.
-func resolveIssueID(db *sql.DB, id string) (string, error) {
+func resolveIssueID(db sqlExecutor, id string) (string, error) {
 	current := strings.TrimSpace(id)
 	if current == "" {
 		return "", fmt.Errorf("issue id is required")
@@ -33,7 +33,7 @@ func resolveIssueID(db *sql.DB, id string) (string, error) {
 }
 
 // lookupRename fetches a rename mapping for an issue ID.
-func lookupRename(db *sql.DB, id string) (string, error) {
+func lookupRename(db sqlExecutor, id string) (string, error) {
 	row := db.QueryRow("SELECT new_id FROM renames WHERE old_id = ?", id)
 	var next string
 	if err := row.Scan(&next); err != nil {
@@ -46,7 +46,7 @@ func lookupRename(db *sql.DB, id string) (string, error) {
 }
 
 // issueExists reports whether an issue exists for the given ID.
-func issueExists(db *sql.DB, id string) (bool, error) {
+func issueExists(db sqlExecutor, id string) (bool, error) {
 	var count int
 	row := db.QueryRow("SELECT COUNT(1) FROM issues WHERE id = ?", id)
 	if err := row.Scan(&count); err != nil {
@@ -56,7 +56,7 @@ func issueExists(db *sql.DB, id string) (bool, error) {
 }
 
 // ensureIssueMissing asserts that no issue exists with the given ID.
-func ensureIssueMissing(db *sql.DB, id string) error {
+func ensureIssueMissing(db sqlExecutor, id string) error {
 	exists, err := issueExists(db, id)
 	if err != nil {
 		return err
