@@ -32,7 +32,7 @@ func TestSortEventsOrdersRenameBeforeDeps(t *testing.T) {
 	}
 }
 
-func TestRebuildCacheIgnoresDuplicateCreateEvents(t *testing.T) {
+func TestEnsureCacheIgnoresDuplicateCreateEvents(t *testing.T) {
 	root := t.TempDir()
 	if err := InitProject(root); err != nil {
 		t.Fatalf("init project: %v", err)
@@ -44,7 +44,7 @@ func TestRebuildCacheIgnoresDuplicateCreateEvents(t *testing.T) {
 	if err := AppendEvent(root, NewCreateEvent(issueID, "First", "", "task", "2024-01-01T00:00:01Z", 2)); err != nil {
 		t.Fatalf("append duplicate create: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issues, err := ListIssues(root)
@@ -57,7 +57,7 @@ func TestRebuildCacheIgnoresDuplicateCreateEvents(t *testing.T) {
 }
 
 // TestApplyEventsRenameResolvesByNewID guards the incremental replay invariant
-// the pebble names: applying create+rename via applyEvents (not RebuildCache)
+// the pebble names: applying create+rename via applyEvents (not EnsureCache)
 // must leave the NEW id resolvable to the row.
 func TestApplyEventsRenameResolvesByNewID(t *testing.T) {
 	dir := t.TempDir()

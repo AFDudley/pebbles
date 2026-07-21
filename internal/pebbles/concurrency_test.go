@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // seedProject initialises a project with one issue and a built cache.
@@ -19,7 +20,7 @@ func seedProject(t *testing.T, issueID string) string {
 	if err := AppendEvent(root, NewCreateEvent(issueID, "Seed", "", "task", "2026-01-01T00:00:00Z", 2)); err != nil {
 		t.Fatalf("append create: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	return root
@@ -27,7 +28,7 @@ func seedProject(t *testing.T, issueID string) string {
 
 // TestConcurrentWritersAllSucceed reproduces pebble so-b08's write half: N
 // concurrent writers each append an event and refresh the cache, exactly as a
-// write verb does (cmd/pb/main.go: AppendEvent then RebuildCache). Without an
+// write verb does (cmd/pb/main.go: AppendEvent then EnsureCache). Without an
 // effective busy_timeout every writer but one fails with
 // "database is locked (5) (SQLITE_BUSY)" instead of briefly waiting for the
 // lock. Concurrency is normal for pb — several agents share one bus — so a
@@ -49,7 +50,7 @@ func TestConcurrentWritersAllSucceed(t *testing.T) {
 				errs[index] = fmt.Errorf("append: %w", err)
 				return
 			}
-			if err := RebuildCache(root); err != nil {
+			if err := EnsureCache(root); err != nil {
 				errs[index] = fmt.Errorf("rebuild: %w", err)
 			}
 		}(i)
@@ -89,7 +90,7 @@ func TestReadDuringWriteReturnsCorrectAnswer(t *testing.T) {
 				writeErr = fmt.Errorf("append: %w", err)
 				return
 			}
-			if err := RebuildCache(root); err != nil {
+			if err := EnsureCache(root); err != nil {
 				writeErr = fmt.Errorf("rebuild: %w", err)
 				return
 			}
@@ -140,12 +141,12 @@ func TestOpenDBSetsBusyTimeout(t *testing.T) {
 	}
 }
 
-// TestRebuildCacheIsAtomic asserts a failed rebuild leaves the previous cache
-// intact rather than a half-dropped one. RebuildCache replaces the whole cache
+// TestEnsureCacheIsAtomic asserts a failed rebuild leaves the previous cache
+// intact rather than a half-dropped one. EnsureCache replaces the whole cache
 // (drop, recreate, replay), so it must commit as ONE transaction: a reader that
 // lands mid-rebuild otherwise sees dropped/empty tables and answers "no rows"
 // for an issue that plainly exists (so-b08's transient empty scan).
-func TestRebuildCacheIsAtomic(t *testing.T) {
+func TestEnsureCacheIsAtomic(t *testing.T) {
 	root := seedProject(t, "pb-atomic")
 	// Replace the log with one that drops the cached issue and cannot replay
 	// (an orphan comment), as an out-of-band write such as a git checkout can.
@@ -164,7 +165,7 @@ func TestRebuildCacheIsAtomic(t *testing.T) {
 	if err := os.WriteFile(EventsPath(root), append(line, '\n'), 0600); err != nil {
 		t.Fatalf("replace events log: %v", err)
 	}
-	err = RebuildCache(root)
+	err = EnsureCache(root)
 	if err == nil {
 		t.Fatal("expected rebuild to fail on an unappliable event")
 	}
@@ -183,5 +184,136 @@ func TestRebuildCacheIsAtomic(t *testing.T) {
 	}
 	if issue.Title != "Seed" {
 		t.Fatalf("expected the prior cache intact, got %+v", issue)
+	}
+}
+
+// TestEnsureCacheChecksStalenessUnderTheWriteLock reproduces pebble so-391's
+// residual race: so-b08 made the rebuild itself one immediate transaction, but
+// the STALENESS CHECK still ran before the write lock was taken. Every process
+// that observed a stale hash then performed its own full rebuild once the lock
+// freed, so one hash change under contention convoyed N redundant full
+// rebuilds — and the busy_timeout budget expired mid-convoy in production
+// ("reset schema: database is locked (5) (SQLITE_BUSY)").
+//
+// The discriminator: while one handle holds the write lock, it rebuilds the
+// cache to the CURRENT log hash and plants a marker row in cache_meta. A
+// concurrent EnsureCache that queued behind it must re-check staleness UNDER
+// the lock, see the cache fresh, and touch nothing — the marker survives. The
+// pre-lock-check code instead decided "stale" up front and, after waiting,
+// dropped and rebuilt every table redundantly — destroying the marker.
+func TestEnsureCacheChecksStalenessUnderTheWriteLock(t *testing.T) {
+	root := seedProject(t, "pb-lock")
+	// Stale the cache: append an event so the log hash no longer matches.
+	event := NewCommentEvent("pb-lock", "stale it", "2026-01-01T00:01:00Z")
+	if err := AppendEvent(root, event); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	// Handle A takes the write lock (openDB's _txlock makes Begin immediate).
+	dbA, err := openDB(DBPath(root))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = dbA.Close() }()
+	txA, err := dbA.Begin()
+	if err != nil {
+		t.Fatalf("begin holder tx: %v", err)
+	}
+	// The contender queues behind handle A's write lock.
+	errCh := make(chan error, 1)
+	go func() { errCh <- EnsureCache(root) }()
+	// Give the contender time to run any pre-lock staleness check and block on
+	// the lock. The green path does not depend on this window — a correct
+	// EnsureCache re-checks under the lock no matter when it acquires it.
+	time.Sleep(500 * time.Millisecond)
+	// While holding the lock: rebuild to the current log hash and plant the
+	// marker, exactly what a winning contender does.
+	data, err := os.ReadFile(EventsPath(root))
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	events, err := decodeEvents(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	sortEvents(events)
+	if err := resetSchema(txA); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if err := ensureSchema(txA); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if err := applyEvents(txA, events); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := storeEventsHash(txA, hashEvents(data)); err != nil {
+		t.Fatalf("store hash: %v", err)
+	}
+	if _, err := txA.Exec(
+		"INSERT INTO cache_meta (key, value) VALUES ('so391-marker', '1')",
+	); err != nil {
+		t.Fatalf("plant marker: %v", err)
+	}
+	if err := txA.Commit(); err != nil {
+		t.Fatalf("commit holder tx: %v", err)
+	}
+	// The contender must WAIT and succeed — never SQLITE_BUSY.
+	if err := <-errCh; err != nil {
+		t.Fatalf("concurrent EnsureCache failed: %v", err)
+	}
+	// The cache was fresh when the contender got the lock, so it must not have
+	// rebuilt: the marker survives. A destroyed marker is the redundant
+	// rebuild — the pre-lock staleness decision so-391 removes.
+	dbB, err := openDB(DBPath(root))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = dbB.Close() }()
+	var v string
+	err = dbB.QueryRow(
+		"SELECT value FROM cache_meta WHERE key = 'so391-marker'",
+	).Scan(&v)
+	if err != nil {
+		t.Fatalf("marker destroyed: the contender rebuilt a fresh cache (staleness was decided before the lock): %v", err)
+	}
+}
+
+// TestConcurrentRebuildRacersAllSucceed is the so-b08 concurrency suite
+// extended to so-391's trigger: a rebuild-triggering hash change with N
+// concurrent read verbs racing to rebuild. Every racer must WAIT and succeed;
+// under the pre-lock staleness check they convoy N full rebuilds instead,
+// which under production contention blows the busy_timeout budget.
+func TestConcurrentRebuildRacersAllSucceed(t *testing.T) {
+	const racers = 8
+	root := seedProject(t, "pb-race")
+	// One hash change stales the cache for every racer at once.
+	event := NewCommentEvent("pb-race", "hash change", "2026-01-01T00:01:00Z")
+	if err := AppendEvent(root, event); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			errs[index] = EnsureCache(root)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("racer %d failed: %v", i, err)
+		}
+	}
+	// The cache must be fresh after the race: the appended comment is visible.
+	comments, err := ListIssueComments(root, "pb-race")
+	if err != nil {
+		t.Fatalf("get comments: %v", err)
+	}
+	if len(comments) != 1 {
+		t.Fatalf("expected 1 comment, got %d", len(comments))
 	}
 }

@@ -67,7 +67,7 @@ func setupListProject(t *testing.T) (root, openID, inProgressID, closedID string
 	if err := pebbles.AppendEvent(root, pebbles.NewCloseEvent(closedID, "2024-01-01T00:40:00Z")); err != nil {
 		t.Fatalf("append closed event: %v", err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 

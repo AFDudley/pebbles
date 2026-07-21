@@ -17,7 +17,7 @@ func TestCreateUpdateClose(t *testing.T) {
 	if err := AppendEvent(root, NewCreateEvent(issueID, "First", "Desc", "task", "2024-01-01T00:00:00Z", 2)); err != nil {
 		t.Fatalf("append create: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issues, err := ListIssues(root)
@@ -46,7 +46,7 @@ func TestCreateUpdateClose(t *testing.T) {
 	if err := AppendEvent(root, NewUpdateEvent(issueID, "2024-01-01T00:30:00Z", updatePayload)); err != nil {
 		t.Fatalf("append update: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache after update: %v", err)
 	}
 	issue, _, err = GetIssue(root, issueID)
@@ -66,7 +66,7 @@ func TestCreateUpdateClose(t *testing.T) {
 	if err := AppendEvent(root, NewTitleUpdatedEvent(issueID, "Renamed", "2024-01-01T00:45:00Z")); err != nil {
 		t.Fatalf("append title update: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache after title update: %v", err)
 	}
 	issue, _, err = GetIssue(root, issueID)
@@ -80,7 +80,7 @@ func TestCreateUpdateClose(t *testing.T) {
 	if err := AppendEvent(root, NewStatusEvent(issueID, "in_progress", "2024-01-01T01:00:00Z")); err != nil {
 		t.Fatalf("append status: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issue, _, err = GetIssue(root, issueID)
@@ -94,7 +94,7 @@ func TestCreateUpdateClose(t *testing.T) {
 	if err := AppendEvent(root, NewCloseEvent(issueID, "2024-01-01T02:00:00Z")); err != nil {
 		t.Fatalf("append close: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issue, _, err = GetIssue(root, issueID)
@@ -126,7 +126,7 @@ func TestReopenClearsClosedAt(t *testing.T) {
 	if err := AppendEvent(root, NewStatusEvent(issueID, StatusOpen, "2024-01-01T02:00:00Z")); err != nil {
 		t.Fatalf("append reopen status: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issue, _, err := GetIssue(root, issueID)
@@ -162,7 +162,7 @@ func TestListIssueComments(t *testing.T) {
 	if err := AppendEvent(root, NewCommentEvent(issueID, "Second note", "2024-01-07T00:00:03Z")); err != nil {
 		t.Fatalf("append comment 2: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	comments, err := ListIssueComments(root, issueID)
@@ -200,7 +200,7 @@ func TestRenameEvent(t *testing.T) {
 	if err := AppendEvent(root, NewStatusEvent(oldID, StatusInProgress, "2024-01-04T02:00:00Z")); err != nil {
 		t.Fatalf("append status: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	issue, _, err := GetIssue(root, oldID)
@@ -236,7 +236,7 @@ func TestRenameUpdatesDeps(t *testing.T) {
 	if err := AppendEvent(root, NewRenameEvent(issueB, renamedB, "2024-01-05T00:00:03Z")); err != nil {
 		t.Fatalf("append rename: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	_, deps, err := GetIssue(root, issueA)
@@ -273,7 +273,7 @@ func TestReadyList(t *testing.T) {
 	if err := AppendEvent(root, NewDepAddEvent(issueC, issueB, DepTypeParentChild, "2024-01-02T00:00:04Z")); err != nil {
 		t.Fatalf("append parent-child dep: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	ready, err := ListReadyIssues(root)
@@ -287,7 +287,7 @@ func TestReadyList(t *testing.T) {
 	if err := AppendEvent(root, NewCloseEvent(issueB, "2024-01-02T00:00:05Z")); err != nil {
 		t.Fatalf("append close: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	ready, err = ListReadyIssues(root)
@@ -326,7 +326,7 @@ func TestBlockedList(t *testing.T) {
 	if err := AppendEvent(root, NewCloseEvent(issueC, "2024-01-02T00:01:05Z")); err != nil {
 		t.Fatalf("append close C: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	blocked, err := ListBlockedIssues(root)
@@ -342,7 +342,7 @@ func TestBlockedList(t *testing.T) {
 	if err := AppendEvent(root, NewCloseEvent(issueB, "2024-01-02T00:01:06Z")); err != nil {
 		t.Fatalf("append close B: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache after close: %v", err)
 	}
 	blocked, err = ListBlockedIssues(root)
@@ -378,7 +378,7 @@ func TestDependencyTree(t *testing.T) {
 	if err := AppendEvent(root, NewDepAddEvent(issueB, issueC, DepTypeBlocks, "2024-01-03T00:00:04Z")); err != nil {
 		t.Fatalf("append dep B->C: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	tree, err := DependencyTree(root, issueA)
@@ -433,7 +433,7 @@ func TestListIssueHierarchy(t *testing.T) {
 	if err := AppendEvent(root, NewDepAddEvent(issueGrand, issueChildA, DepTypeParentChild, "2024-01-06T00:00:07Z")); err != nil {
 		t.Fatalf("append grandchild parent: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	items, err := ListIssueHierarchy(root)

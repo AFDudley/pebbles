@@ -44,7 +44,7 @@ func readEvents(path string) ([]Event, error) {
 //
 // Decoding from bytes rather than a file handle lets a caller derive both the
 // events and their digest from one read of the log, leaving no window for a
-// concurrent append to land between the two (see RebuildCache).
+// concurrent append to land between the two (see EnsureCache).
 func decodeEvents(data []byte) ([]Event, error) {
 	// Scan the content line by line to decode JSONL records.
 	scanner := bufio.NewScanner(bytes.NewReader(data))

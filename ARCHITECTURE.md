@@ -56,6 +56,11 @@ error.
   than failing immediately with `SQLITE_BUSY`.
 - Writes take the lock up front (`_txlock=immediate`), so a rebuild cannot fail
   on a read-to-write upgrade.
+- The staleness check and the rebuild run as ONE immediate transaction
+  (`EnsureCache`, so-391). A contender that queues behind an in-flight rebuild
+  re-checks the events-log digest under the lock, sees the cache fresh, and
+  does nothing — one hash change causes exactly one rebuild, not a convoy of
+  redundant ones that exhausts the busy-timeout budget.
 - Waiting is bounded: a lock held past the timeout still fails loudly. Callers
   do not retry.
 

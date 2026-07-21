@@ -15,51 +15,44 @@ import (
 )
 
 // cacheMetaEventsHash is the cache_meta key recording the digest of the events
-// log the cache was last built from. See needsRebuild.
+// log the cache was last built from. See EnsureCache.
 const cacheMetaEventsHash = "events_hash"
 
 // busyTimeoutMillis is how long SQLite waits for a held lock before erroring.
 const busyTimeoutMillis = 5000
 
-// EnsureCache rebuilds the cache when it no longer matches the events log.
-func EnsureCache(root string) error {
-	needs, err := needsRebuild(EventsPath(root), DBPath(root))
-	if err != nil {
-		return err
-	}
-	if needs {
-		return RebuildCache(root)
-	}
-	return nil
-}
-
-// RebuildCache recreates the SQLite cache from the event log.
+// EnsureCache makes the SQLite cache match the events log, rebuilding it when
+// it no longer does.
 //
-// The whole replacement — drop, recreate, replay, digest — commits as ONE
-// transaction. It replaces every row in the cache, so a reader that observed it
-// midway would see dropped or half-populated tables and answer "no rows" for an
-// issue that plainly exists (pebble so-b08's transient empty scan). Inside a
-// transaction there is no midway: a concurrent reader sees either the whole
-// previous cache or the whole new one, and a rebuild that fails rolls back
-// rather than leaving the cache destroyed.
-func RebuildCache(root string) error {
-	// Derive the events and their digest from a SINGLE read of the log, so the
-	// digest describes exactly what was replayed. Reading the log twice lets a
-	// concurrent append land in between: the cache would then record a digest
-	// covering an event it never applied, and needsRebuild — which compares
-	// that digest against the log — would call the cache fresh and serve the
-	// missing event to nobody until the next write.
-	data, err := os.ReadFile(EventsPath(root))
-	if err != nil {
-		return fmt.Errorf("read events log: %w", err)
-	}
-	events, err := decodeEvents(data)
-	if err != nil {
-		return err
-	}
-	hash := hashEvents(data)
-	// Normalize event order before replay.
-	sortEvents(events)
+// The staleness check and the rebuild run as ONE immediate transaction
+// (pebble so-391). so-b08 made the rebuild itself a single transaction, but
+// the staleness check still ran BEFORE the write lock was taken: every
+// process that observed a stale hash then performed its own full rebuild once
+// the lock freed, so one hash change under contention convoyed N redundant
+// full rebuilds — and the busy_timeout budget expired mid-convoy ("reset
+// schema: database is locked (5) (SQLITE_BUSY)" in production). With the
+// check inside the transaction, the first contender rebuilds and every queued
+// contender re-reads the hash under the lock, sees the cache fresh, and does
+// nothing. openDB's _txlock=immediate makes Begin take the write lock up
+// front, so a contended rebuild WAITS on busy_timeout instead of failing on a
+// read→write upgrade; past the budget it still fails loud.
+//
+// Staleness is derived from CONTENT, not file mtime: the cache stores the
+// digest of the events log it was built from, and a rebuild is required when
+// that digest is absent (missing/old-schema/partial cache) or differs from
+// the current log's digest. mtime is unreliable — an out-of-band write (git
+// checkout/merge, a concurrent writer, or a PEBBLES_DIR shared across
+// worktrees) can leave the log's mtime not-newer than the db while its
+// content diverges, which a timestamp comparison silently misses (so-fe0).
+//
+// The whole replacement — check, drop, recreate, replay, digest — commits as
+// ONE transaction. It replaces every row in the cache, so a reader that
+// observed it midway would see dropped or half-populated tables and answer
+// "no rows" for an issue that plainly exists (so-b08's transient empty scan).
+// Inside a transaction there is no midway: a concurrent reader sees either
+// the whole previous cache or the whole new one, and a rebuild that fails
+// rolls back rather than leaving the cache destroyed.
+func EnsureCache(root string) error {
 	db, err := openDB(DBPath(root))
 	if err != nil {
 		return err
@@ -71,8 +64,36 @@ func RebuildCache(root string) error {
 	}
 	// Roll back unless the commit below succeeds; a rolled-back rebuild leaves
 	// the previous cache intact and its digest unchanged, so the next open
-	// simply rebuilds again.
+	// simply rebuilds again. On the fresh path the rollback just ends a
+	// transaction that wrote nothing.
 	defer func() { _ = tx.Rollback() }()
+	// Read the log INSIDE the write lock, and derive the events and their
+	// digest from that SINGLE read. Inside the lock: the freshness decision
+	// and the replay then describe a log snapshot no older than any rebuild
+	// this transaction queued behind, so a queued rebuild can never overwrite
+	// a newer cache from an older snapshot. A single read: reading the log
+	// twice lets a concurrent append land in between, recording a digest that
+	// covers an event the replay never applied (so-b08).
+	data, err := os.ReadFile(EventsPath(root))
+	if err != nil {
+		return fmt.Errorf("read events log: %w", err)
+	}
+	hash := hashEvents(data)
+	got, err := loadEventsHash(tx)
+	if err != nil {
+		return err
+	}
+	if got == hash {
+		// Fresh — either it was never stale, or a contender this transaction
+		// waited behind already rebuilt it. Touch nothing.
+		return nil
+	}
+	events, err := decodeEvents(data)
+	if err != nil {
+		return err
+	}
+	// Normalize event order before replay.
+	sortEvents(events)
 	// Recreate schema and replay the event log.
 	if err := resetSchema(tx); err != nil {
 		return err
@@ -91,48 +112,6 @@ func RebuildCache(root string) error {
 		return fmt.Errorf("commit rebuild: %w", err)
 	}
 	return nil
-}
-
-// needsRebuild reports whether the cache no longer matches the events log.
-//
-// Staleness is derived from CONTENT, not file mtime: the cache stores the
-// digest of the events log it was built from, and a rebuild is required when
-// that digest is absent (missing/old-schema/partial cache) or differs from the
-// current log's digest. mtime is unreliable — an out-of-band write (git
-// checkout/merge, a concurrent writer, or a PEBBLES_DIR shared across
-// worktrees) can leave the log's mtime not-newer than the db while its content
-// diverges, which a timestamp comparison silently misses (pebble so-fe0).
-func needsRebuild(eventsPath, dbPath string) (bool, error) {
-	if _, err := os.Stat(dbPath); err != nil {
-		// Missing cache means a rebuild is required.
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		return false, fmt.Errorf("stat cache: %w", err)
-	}
-	wantHash, err := hashEventsFile(eventsPath)
-	if err != nil {
-		return false, err
-	}
-	db, err := openDB(dbPath)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = db.Close() }()
-	gotHash, err := loadEventsHash(db)
-	if err != nil {
-		return false, err
-	}
-	return gotHash != wantHash, nil
-}
-
-// hashEventsFile returns a hex digest of the events log content.
-func hashEventsFile(eventsPath string) (string, error) {
-	data, err := os.ReadFile(eventsPath)
-	if err != nil {
-		return "", fmt.Errorf("read events log: %w", err)
-	}
-	return hashEvents(data), nil
 }
 
 // hashEvents returns a hex digest of raw events log content.

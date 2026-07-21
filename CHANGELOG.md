@@ -19,6 +19,12 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 - `pb show` and other reads during an in-flight write no longer return a
   transient `sql: no rows in result set`. The cache rebuild now commits as one
   transaction, so a reader never observes it mid-replay (so-b08).
+- Concurrent cache rebuilds no longer convoy into `database is locked
+  (SQLITE_BUSY)`. The staleness check now runs INSIDE the same immediate
+  transaction as the rebuild (`EnsureCache`; `RebuildCache` is folded into
+  it), so a contender that waited out another process's rebuild re-checks the
+  events-log digest under the lock and skips instead of redundantly dropping
+  and replaying the whole cache (so-391).
 
 ## [0.4.0] - 2026-01-21
 

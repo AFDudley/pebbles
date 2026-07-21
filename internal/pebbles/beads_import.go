@@ -119,7 +119,7 @@ func ApplyBeadsImportPlan(root string, plan BeadsImportPlan) (BeadsImportResult,
 			return BeadsImportResult{}, err
 		}
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		return BeadsImportResult{}, err
 	}
 	plan.Result.EventsWritten = len(plan.Events)

@@ -80,7 +80,7 @@ func TestNextChildIssueIDSkipsUsedSuffixes(t *testing.T) {
 	if err := AppendEvent(root, NewDepAddEvent(childThree, parentID, DepTypeParentChild, "2024-01-06T00:00:05Z")); err != nil {
 		t.Fatalf("append child 3 dep: %v", err)
 	}
-	if err := RebuildCache(root); err != nil {
+	if err := EnsureCache(root); err != nil {
 		t.Fatalf("rebuild cache: %v", err)
 	}
 	next, err := NextChildIssueID(root, parentID)

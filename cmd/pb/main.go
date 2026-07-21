@@ -158,7 +158,7 @@ func runCreate(root string, args []string) {
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 	fmt.Println(issueID)
@@ -442,7 +442,7 @@ func runUpdate(root string, args []string) {
 			exitError(err)
 		}
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -477,7 +477,7 @@ func runClose(root string, args []string) {
 		}
 	}
 	// Rebuild the cache once after all events are written.
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -507,7 +507,7 @@ func runReopen(root string, args []string) {
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -538,7 +538,7 @@ func runComment(root string, args []string) {
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -686,7 +686,7 @@ func runDepAdd(root, issueID, dependsOn, depType string) {
 			exitError(err)
 		}
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -705,7 +705,7 @@ func runDepRemove(root, issueID, dependsOn, depType string) {
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 }
@@ -845,7 +845,7 @@ func runRename(root string, args []string) {
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 	fmt.Printf("Renamed %s -> %s\n", oldID, newID)
@@ -912,7 +912,7 @@ func runRenamePrefix(root string, args []string) {
 			exitError(err)
 		}
 	}
-	if err := pebbles.RebuildCache(root); err != nil {
+	if err := pebbles.EnsureCache(root); err != nil {
 		exitError(err)
 	}
 	fmt.Printf("Renamed %d issues to %s\n", len(events), newPrefix)
