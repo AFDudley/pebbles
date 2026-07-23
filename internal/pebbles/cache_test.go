@@ -1,6 +1,7 @@
 package pebbles
 
 import (
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -128,5 +129,117 @@ func TestEnsureCacheDetectsOutOfBandRename(t *testing.T) {
 	// No stray rollback journal must survive a resolved read.
 	if _, err := os.Stat(DBPath(root) + "-journal"); err == nil {
 		t.Fatalf("stray pebbles.db-journal left behind")
+	}
+}
+
+// TestOpenDBUsesWALMode guards exo-e32 clause c1: pb's cache connection must
+// report journal_mode=wal, not SQLite's default rollback journal — the
+// property that lets a reader avoid contending for the writer's file lock.
+func TestOpenDBUsesWALMode(t *testing.T) {
+	dir := t.TempDir()
+	db, err := openDB(dir + "/wal.db")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("query journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		t.Fatalf("expected journal_mode wal, got %q", mode)
+	}
+}
+
+// TestEnsureCacheRebuildsOnceOnCorruptCacheFile guards exo-e32 clauses
+// c1's classification and c2: a pebbles.db that is not a readable SQLite
+// file at all (garbage bytes — a torn write, a truncated copy, anything short
+// of the log itself being bad) is CACHE INVALIDITY, not data loss. With a
+// healthy events log, EnsureCache must recover by deleting the corrupt file
+// and rebuilding from the log ONCE, transparently — the caller never sees an
+// error and the rebuilt cache serves correct data.
+func TestEnsureCacheRebuildsOnceOnCorruptCacheFile(t *testing.T) {
+	root := t.TempDir()
+	if err := InitProject(root); err != nil {
+		t.Fatalf("init project: %v", err)
+	}
+	if err := AppendEvent(root, NewCreateEvent("pb-1", "Recoverable", "", "task", "2026-01-01T00:00:00Z", 2)); err != nil {
+		t.Fatalf("append create: %v", err)
+	}
+	// Build a real cache once, then destroy it with garbage bytes — not a
+	// missing file (a fresh-cache path), a PRESENT but unreadable one.
+	if err := EnsureCache(root); err != nil {
+		t.Fatalf("initial build: %v", err)
+	}
+	if err := os.WriteFile(DBPath(root), []byte("not a sqlite database, just garbage bytes"), 0o600); err != nil {
+		t.Fatalf("corrupt cache file: %v", err)
+	}
+	if err := EnsureCache(root); err != nil {
+		t.Fatalf("EnsureCache did not recover from a corrupt cache file: %v", err)
+	}
+	issues, err := ListIssues(root)
+	if err != nil {
+		t.Fatalf("list issues after recovery: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "pb-1" {
+		t.Fatalf("expected the log's one issue after recovery, got %+v", issues)
+	}
+}
+
+// TestEnsureCacheFailsLoudWhenLogAlsoCorrupt guards exo-e32 clause c3: when
+// the corrupt-cache recovery's OWN rebuild attempt also fails — here because
+// the events LOG itself is corrupt, so no rebuild can ever succeed —
+// EnsureCache must return the failure from that second, final attempt rather
+// than retry again or silently succeed. This is the fail-loud boundary: a
+// bad cache is recoverable once from a good log, but a bad log is not
+// recoverable at all.
+func TestEnsureCacheFailsLoudWhenLogAlsoCorrupt(t *testing.T) {
+	root := t.TempDir()
+	if err := InitProject(root); err != nil {
+		t.Fatalf("init project: %v", err)
+	}
+	if err := AppendEvent(root, NewCreateEvent("pb-1", "Not recoverable", "", "task", "2026-01-01T00:00:00Z", 2)); err != nil {
+		t.Fatalf("append create: %v", err)
+	}
+	if err := EnsureCache(root); err != nil {
+		t.Fatalf("initial build: %v", err)
+	}
+	if err := os.WriteFile(DBPath(root), []byte("garbage cache"), 0o600); err != nil {
+		t.Fatalf("corrupt cache file: %v", err)
+	}
+	if err := os.WriteFile(EventsPath(root), []byte("this is not a valid events log\n"), 0o600); err != nil {
+		t.Fatalf("corrupt events log: %v", err)
+	}
+	err := EnsureCache(root)
+	if err == nil {
+		t.Fatalf("expected EnsureCache to fail loud when the log itself is corrupt, got nil")
+	}
+}
+
+// TestIsCacheCorruptionDistinguishesCacheFromLogErrors guards the
+// classification EnsureCache's recovery branches on: a genuinely-unreadable
+// SQLite cache file must be recognized (so it is deleted and retried), while
+// an events-LOG problem (a malformed JSONL line) must NOT be, since deleting
+// and rebuilding the cache cannot fix a bad log — the second attempt would
+// fail identically, wasting the one retry EnsureCache grants.
+func TestIsCacheCorruptionDistinguishesCacheFromLogErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"sqlite notadb", errors.New("begin rebuild: file is not a database (26)"), true},
+		{"sqlite corrupt", errors.New("load events hash: database disk image is malformed (11)"), true},
+		{"log parse error", errors.New("parse event: unexpected end of JSON input"), false},
+		{"log scan error", errors.New("scan events log: unexpected EOF"), false},
+		{"log missing", errors.New("read events log: open events log: no such file or directory"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isCacheCorruption(tc.err); got != tc.want {
+				t.Fatalf("isCacheCorruption(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

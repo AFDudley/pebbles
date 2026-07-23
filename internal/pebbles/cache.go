@@ -52,7 +52,67 @@ const busyTimeoutMillis = 5000
 // Inside a transaction there is no midway: a concurrent reader sees either
 // the whole previous cache or the whole new one, and a rebuild that fails
 // rolls back rather than leaving the cache destroyed.
+//
+// A cache database that is itself unreadable — not merely stale, but garbage
+// (truncated, overwritten, a non-SQLite file) — is CACHE INVALIDITY, not data
+// loss: it is rebuilt from events.jsonl exactly like a stale one (exo-e32).
+// EnsureCache delegates the check-and-rebuild to ensureCacheOnce and, if that
+// fails with a signature identifying the CACHE FILE itself as unreadable
+// (isCacheCorruption), deletes the corrupt cache and its WAL/journal
+// siblings and rebuilds ONCE more from the log. A second consecutive failure
+// — whether the rebuilt cache is corrupt again or the events log itself is
+// unparseable — is fail-loud corruption of the LOG: it returns the error
+// from that second attempt with no further retry.
 func EnsureCache(root string) error {
+	if err := ensureCacheOnce(root); err != nil {
+		if !isCacheCorruption(err) {
+			return err
+		}
+		if rmErr := removeCacheFiles(DBPath(root)); rmErr != nil {
+			return fmt.Errorf("remove corrupt cache (after %v): %w", err, rmErr)
+		}
+		if err := ensureCacheOnce(root); err != nil {
+			return fmt.Errorf("rebuild after cache invalidation: %w", err)
+		}
+	}
+	return nil
+}
+
+// removeCacheFiles deletes the SQLite cache file at path plus its WAL/
+// shared-memory/rollback-journal siblings, so a rebuild starts from nothing
+// rather than reusing any surviving corrupt fragment. Missing files are not
+// an error — the cache may never have grown a WAL/journal file at all.
+func removeCacheFiles(path string) error {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s%s: %w", path, suffix, err)
+		}
+	}
+	return nil
+}
+
+// isCacheCorruption reports whether err names the SQLite CACHE FILE itself as
+// unreadable — SQLITE_NOTADB ("file is not a database") or SQLITE_CORRUPT
+// ("database disk image is malformed"), both signatures a genuinely-garbage
+// pebbles.db produces before EnsureCache ever reaches the events log. Distinct
+// from an events-log problem (decodeEvents' "parse event:" / "scan events
+// log:", or a missing log from "read events log:"): those occur only AFTER
+// the cache file itself opened and began a transaction successfully, so a
+// fresh cache would fail identically — no point deleting and retrying, and
+// EnsureCache does not try (see it, above).
+func isCacheCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "file is not a database") ||
+		strings.Contains(msg, "database disk image is malformed")
+}
+
+// ensureCacheOnce is EnsureCache's single check-and-rebuild attempt (see its
+// doc comment for the staleness/atomicity discipline); EnsureCache wraps it
+// with the exo-e32 rebuild-once-on-corruption recovery.
+func ensureCacheOnce(root string) error {
 	db, err := openDB(DBPath(root))
 	if err != nil {
 		return err
@@ -158,7 +218,18 @@ func isNoSuchTable(err error) bool {
 // openDB opens the SQLite cache at the given path.
 //
 // This is the ONE place pb opens a connection, so every verb — read and write
-// alike — inherits this DSN (pebble so-b08):
+// alike — inherits this DSN (pebble so-b08, WAL mode added exo-e32):
+//
+//   - _pragma=journal_mode(wal) puts the cache in write-ahead-log mode instead
+//     of SQLite's default rollback journal. Under the rollback journal a
+//     reader and a writer still contend for the SAME file lock, so even with
+//     busy_timeout set a reader can be made to wait behind a writer for the
+//     whole budget; WAL gives readers a private, consistent snapshot of the
+//     database as of when they started, so a concurrent writer never blocks
+//     or is blocked by a read — the exact "readers never observe mid-write
+//     state" property pebble exo-e32 requires. journal_mode=WAL is persisted
+//     in the database file's header once set, so it survives across
+//     connections/processes; only ever needs setting once per file.
 //
 //   - _pragma=busy_timeout(N) makes a connection WAIT up to N ms for a lock
 //     another process holds instead of failing immediately with
@@ -169,6 +240,8 @@ func isNoSuchTable(err error) bool {
 //     newConn -> applyQueryParams), and orders busy_timeout first.
 //     This is not a retry loop: SQLite's busy handler waits on the lock and the
 //     operation still fails loudly if the lock is not released within N ms.
+//     WAL mode does not eliminate writer-writer contention (two processes both
+//     wanting the single write lock), so busy_timeout still matters there.
 //
 //   - _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE, taking the write
 //     lock up front. A deferred transaction that reads first and writes later
@@ -176,7 +249,10 @@ func isNoSuchTable(err error) bool {
 //     SQLite cannot safely wait once another writer has changed the database
 //     underneath the reader's snapshot.
 func openDB(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_txlock=immediate", path, busyTimeoutMillis)
+	dsn := fmt.Sprintf(
+		"%s?_pragma=journal_mode(wal)&_pragma=busy_timeout(%d)&_txlock=immediate",
+		path, busyTimeoutMillis,
+	)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
