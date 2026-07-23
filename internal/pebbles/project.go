@@ -65,7 +65,7 @@ func ensureGitignore(root string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	content := []byte("pebbles.db\nevents.jsonl.lock\n")
+	content := []byte("pebbles.db\nevents.jsonl.lock\npebbles.db.rebuild.lock\n")
 	if err := os.WriteFile(path, content, 0600); err != nil {
 		return fmt.Errorf("create .pebbles/.gitignore: %w", err)
 	}
