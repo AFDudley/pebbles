@@ -2,9 +2,9 @@ package pebbles
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -21,13 +21,12 @@ func LoadEventLog(root string) ([]EventLogEntry, error) {
 
 // readEventLog reads a JSONL log file and records line numbers for each event.
 func readEventLog(path string) ([]EventLogEntry, error) {
-	file, err := os.Open(path)
+	data, err := readEventsFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("open events log: %w", err)
+		return nil, err
 	}
-	defer func() { _ = file.Close() }()
 	// Scan the log line by line to capture line numbers.
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	var entries []EventLogEntry
 	lineNumber := 0
 	for scanner.Scan() {

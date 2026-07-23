@@ -118,60 +118,93 @@ func ensureCacheOnce(root string) error {
 		return err
 	}
 	defer func() { _ = db.Close() }()
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin rebuild: %w", err)
-	}
-	// Roll back unless the commit below succeeds; a rolled-back rebuild leaves
-	// the previous cache intact and its digest unchanged, so the next open
-	// simply rebuilds again. On the fresh path the rollback just ends a
-	// transaction that wrote nothing.
-	defer func() { _ = tx.Rollback() }()
-	// Read the log INSIDE the write lock, and derive the events and their
-	// digest from that SINGLE read. Inside the lock: the freshness decision
-	// and the replay then describe a log snapshot no older than any rebuild
-	// this transaction queued behind, so a queued rebuild can never overwrite
-	// a newer cache from an older snapshot. A single read: reading the log
-	// twice lets a concurrent append land in between, recording a digest that
-	// covers an event the replay never applied (so-b08).
-	data, err := os.ReadFile(EventsPath(root))
+
+	// Fast path: a plain read of the cache's recorded digest, with no
+	// exclusive lock taken. WAL mode (openDB) gives this its own consistent
+	// snapshot with zero contention against a concurrent writer's BEGIN
+	// IMMEDIATE below -- that MVCC isolation is the whole point of WAL. Every
+	// caller of EnsureCache, including a pure reader like `pb ready`,
+	// previously had to win the SAME single exclusive lock as every
+	// concurrent writer's rebuild just to ask "is the cache fresh?" -- under
+	// sustained multi-process write load that starved some callers past
+	// busy_timeout ("begin rebuild: database is locked (SQLITE_BUSY)",
+	// reproduced under exo-e32's c5 ten-writer stress oracle). A mismatch
+	// here does not rebuild directly -- it falls through and is re-checked
+	// inside the transaction below, preserving so-391's guarantee that only
+	// genuine staleness escalates to the lock, and only the first contender
+	// past it actually rebuilds.
+	data, err := readEventsFile(EventsPath(root))
 	if err != nil {
 		return fmt.Errorf("read events log: %w", err)
 	}
-	hash := hashEvents(data)
-	got, err := loadEventsHash(tx)
-	if err != nil {
+	if got, err := loadEventsHash(db); err != nil {
 		return err
-	}
-	if got == hash {
-		// Fresh — either it was never stale, or a contender this transaction
-		// waited behind already rebuilt it. Touch nothing.
+	} else if got == hashEvents(data) {
 		return nil
 	}
-	events, err := decodeEvents(data)
-	if err != nil {
-		return err
-	}
-	// Normalize event order before replay.
-	sortEvents(events)
-	// Recreate schema and replay the event log.
-	if err := resetSchema(tx); err != nil {
-		return err
-	}
-	if err := ensureSchema(tx); err != nil {
-		return err
-	}
-	if err := applyEvents(tx, events); err != nil {
-		return err
-	}
-	// Record the digest of the events log this cache was built from.
-	if err := storeEventsHash(tx, hash); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rebuild: %w", err)
-	}
-	return nil
+
+	// Slow path: the cache looks stale. Serialize the rebuild across
+	// PROCESSES via flock before ever calling db.Begin() — see
+	// withRebuildLock's doc comment for why this, not busy_timeout, is the
+	// cross-process exclusion point. Everything from here on runs with at
+	// most one contender past the flock at a time, so BEGIN IMMEDIATE below
+	// contends only with a genuinely slow holder, never a queue of peers.
+	return withRebuildLock(DBPath(root), func() error {
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin rebuild: %w", err)
+		}
+		// Roll back unless the commit below succeeds; a rolled-back rebuild
+		// leaves the previous cache intact and its digest unchanged, so the
+		// next open simply rebuilds again. On the fresh path the rollback
+		// just ends a transaction that wrote nothing.
+		defer func() { _ = tx.Rollback() }()
+		// Read the log INSIDE the write lock, and derive the events and their
+		// digest from that SINGLE read. Inside the lock: the freshness
+		// decision and the replay then describe a log snapshot no older than
+		// any rebuild this transaction queued behind, so a queued rebuild can
+		// never overwrite a newer cache from an older snapshot. A single
+		// read: reading the log twice lets a concurrent append land in
+		// between, recording a digest that covers an event the replay never
+		// applied (so-b08).
+		data, err := readEventsFile(EventsPath(root))
+		if err != nil {
+			return fmt.Errorf("read events log: %w", err)
+		}
+		hash := hashEvents(data)
+		got, err := loadEventsHash(tx)
+		if err != nil {
+			return err
+		}
+		if got == hash {
+			// Fresh — either it was never stale, or a contender this flock
+			// held behind it already rebuilt it. Touch nothing.
+			return nil
+		}
+		events, err := decodeEvents(data)
+		if err != nil {
+			return err
+		}
+		// Normalize event order before replay.
+		sortEvents(events)
+		// Recreate schema and replay the event log.
+		if err := resetSchema(tx); err != nil {
+			return err
+		}
+		if err := ensureSchema(tx); err != nil {
+			return err
+		}
+		if err := applyEvents(tx, events); err != nil {
+			return err
+		}
+		if err := storeEventsHash(tx, hash); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit rebuild: %w", err)
+		}
+		return nil
+	})
 }
 
 // hashEvents returns a hex digest of raw events log content.

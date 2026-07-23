@@ -317,3 +317,129 @@ func TestConcurrentRebuildRacersAllSucceed(t *testing.T) {
 		t.Fatalf("expected 1 comment, got %d", len(comments))
 	}
 }
+
+// TestFreshCacheReadDoesNotContendForWriteLock reproduces exo-e32's residual
+// c5 defect: every EnsureCache call, including a pure reader's, unconditionally
+// opened a BEGIN IMMEDIATE transaction just to ask "is the cache fresh?" —
+// so a read contended for the SAME single exclusive lock as every concurrent
+// writer's rebuild. Under sustained multi-process write load that starved
+// some callers past busy_timeout ("begin rebuild: database is locked
+// (SQLITE_BUSY)"). The fast path in ensureCacheOnce checks freshness via a
+// plain read (WAL gives it its own snapshot, no lock needed) before ever
+// calling db.Begin(). Proof here: hold the exclusive write lock open and
+// uncommitted, then confirm a fresh-cache EnsureCache still returns promptly
+// instead of queuing behind it.
+func TestFreshCacheReadDoesNotContendForWriteLock(t *testing.T) {
+	root := seedProject(t, "pb-freshread")
+	// Hold the write lock indefinitely without committing or rolling back.
+	holder, err := openDB(DBPath(root))
+	if err != nil {
+		t.Fatalf("open holder db: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+	tx, err := holder.Begin()
+	if err != nil {
+		t.Fatalf("begin holder tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The cache is fresh (seedProject built it; nothing has changed since).
+	done := make(chan error, 1)
+	go func() { done <- EnsureCache(root) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EnsureCache on a fresh cache failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("EnsureCache blocked on the held write lock despite a fresh cache — the fast path regressed to always taking the exclusive lock")
+	}
+}
+
+// TestManyConcurrentWritersNeverProduceATornLogRead reproduces exo-e32's
+// other residual defect: AppendEvent writes a JSONL line with a single
+// write(2) call, which Linux does not guarantee atomic against a concurrent
+// reader of a regular file — a read racing exactly against an in-flight
+// append can observe a partial line and fail with "parse event: unexpected
+// end of JSON input" (the exact stderr from the 2026-07-23 production crash,
+// reproduced under 10 real OS processes by
+// scripts/verify_pb_concurrent_read_write.py). withEventsFileLock
+// (events_lock.go) closes that window for every log reader and writer; this
+// in-process regression hammers LoadEvents against many concurrent AppendEvent
+// callers.
+func TestManyConcurrentWritersNeverProduceATornLogRead(t *testing.T) {
+	const writers = 20
+	const perWriter = 50
+	root := seedProject(t, "pb-torn")
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			for j := 0; j < perWriter; j++ {
+				event := NewCommentEvent("pb-torn", fmt.Sprintf("w%d-i%d-%s", index, j, strings.Repeat("x", 40)), "2026-01-01T00:01:00Z")
+				if err := AppendEvent(root, event); err != nil {
+					t.Errorf("append: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	reads := 0
+	for {
+		select {
+		case <-done:
+			if reads == 0 {
+				t.Fatal("no reads raced the writers")
+			}
+			return
+		default:
+		}
+		if _, err := LoadEvents(root); err != nil {
+			t.Fatalf("read %d during concurrent writes failed: %v", reads, err)
+		}
+		reads++
+	}
+}
+
+// TestEventsFileLockExcludesConcurrentAccess asserts withEventsFileLock is a
+// real mutual-exclusion primitive: a second acquisition must block until the
+// first releases, never run concurrently with it.
+func TestEventsFileLockExcludesConcurrentAccess(t *testing.T) {
+	root := seedProject(t, "pb-lock-events")
+	path := EventsPath(root)
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = withEventsFileLock(path, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	acquired := make(chan struct{})
+	go func() {
+		_ = withEventsFileLock(path, func() error {
+			close(acquired)
+			return nil
+		})
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second lock acquired while the first was still held")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second lock never acquired after the first released")
+	}
+}
