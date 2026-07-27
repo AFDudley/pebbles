@@ -382,6 +382,8 @@ func runUpdate(root string, args []string) {
 	id = issue.ID
 	timestamp := pebbles.NowTimestamp()
 	var events []pebbles.Event
+	var needsChildAlloc bool
+	var allocParentID string
 	if strings.TrimSpace(*status) != "" {
 		events = append(events, pebbles.NewStatusEvent(id, *status, timestamp))
 	}
@@ -428,18 +430,34 @@ func runUpdate(root string, args []string) {
 		if !clearParent {
 			childID := issue.ID
 			if !pebbles.HasParentChildSuffix(parentIssue.ID, childID) {
-				childID, err = pebbles.NextChildIssueID(root, parentIssue.ID)
-				if err != nil {
-					exitError(err)
-				}
-				events = append(events, pebbles.NewRenameEvent(issue.ID, childID, timestamp))
+				needsChildAlloc = true
+				allocParentID = parentIssue.ID
+			} else {
+				events = append(events, pebbles.NewDepAddEvent(childID, parentIssue.ID, pebbles.DepTypeParentChild, timestamp))
 			}
-			events = append(events, pebbles.NewDepAddEvent(childID, parentIssue.ID, pebbles.DepTypeParentChild, timestamp))
 		}
 	}
-	for _, event := range events {
-		if err := pebbles.AppendEvent(root, event); err != nil {
+	// A new child ID's allocation and the rename that consumes it must be one
+	// atomic step (so-a9f), so the whole batch — including any dep_remove
+	// events already queued above — goes through AllocateChildAndAppend
+	// instead of the plain per-event append loop.
+	if needsChildAlloc {
+		pending := events
+		if _, err := pebbles.AllocateChildAndAppend(root, allocParentID, func(childID string) ([]pebbles.Event, error) {
+			ts := pebbles.NowTimestamp()
+			batch := append(append([]pebbles.Event{}, pending...),
+				pebbles.NewRenameEvent(id, childID, ts),
+				pebbles.NewDepAddEvent(childID, allocParentID, pebbles.DepTypeParentChild, ts),
+			)
+			return batch, nil
+		}); err != nil {
 			exitError(err)
+		}
+	} else {
+		for _, event := range events {
+			if err := pebbles.AppendEvent(root, event); err != nil {
+				exitError(err)
+			}
 		}
 	}
 	if err := pebbles.EnsureCache(root); err != nil {
@@ -668,20 +686,23 @@ func runDepAdd(root, issueID, dependsOn, depType string) {
 	}
 	issueID = issue.ID
 	dependsOn = parent.ID
-	var events []pebbles.Event
 	// Parent-child deps should use parent-based child IDs for lineage.
+	// Allocating that ID and appending the rename which consumes it must be
+	// one atomic step (so-a9f) — see AllocateChildAndAppend.
 	if depType == pebbles.DepTypeParentChild && !pebbles.HasParentChildSuffix(dependsOn, issueID) {
-		childID, err := pebbles.NextChildIssueID(root, dependsOn)
+		renamedFrom := issueID
+		_, err := pebbles.AllocateChildAndAppend(root, dependsOn, func(childID string) ([]pebbles.Event, error) {
+			ts := pebbles.NowTimestamp()
+			return []pebbles.Event{
+				pebbles.NewRenameEvent(renamedFrom, childID, ts),
+				pebbles.NewDepAddEvent(childID, dependsOn, depType, ts),
+			}, nil
+		})
 		if err != nil {
 			exitError(err)
 		}
-		rename := pebbles.NewRenameEvent(issueID, childID, pebbles.NowTimestamp())
-		events = append(events, rename)
-		issueID = childID
-	}
-	events = append(events, pebbles.NewDepAddEvent(issueID, dependsOn, depType, pebbles.NowTimestamp()))
-	// Append the events and rebuild the cache once.
-	for _, event := range events {
+	} else {
+		event := pebbles.NewDepAddEvent(issueID, dependsOn, depType, pebbles.NowTimestamp())
 		if err := pebbles.AppendEvent(root, event); err != nil {
 			exitError(err)
 		}

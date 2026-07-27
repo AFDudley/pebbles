@@ -98,7 +98,18 @@ repos:
     hooks:
       - id: go-fmt
       - id: go-mod-tidy
+      # go-vet's stock run-go-vet.sh does `pkg=$(go list)` from the repo
+      # root, which needs a .go file directly at the module root to resolve
+      # a package there. This repo is cmd/+internal/ only (no root-level
+      # .go file), so the stock entry fails every commit that touches a .go
+      # file with "no Go files in <root>" regardless of which files changed.
+      # Vetting the whole module instead of the stock per-changed-directory
+      # invocation sidesteps that root-package assumption and is still a
+      # complete `go vet` run.
       - id: go-vet
+        entry: bash -c 'go vet ./...'
+        language: system
+        pass_filenames: false
 
   # === Go: golangci-lint ===
   - repo: https://github.com/golangci/golangci-lint

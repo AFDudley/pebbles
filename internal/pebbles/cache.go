@@ -150,15 +150,6 @@ func ensureCacheOnce(root string) error {
 	// most one contender past the flock at a time, so BEGIN IMMEDIATE below
 	// contends only with a genuinely slow holder, never a queue of peers.
 	return withRebuildLock(DBPath(root), func() error {
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("begin rebuild: %w", err)
-		}
-		// Roll back unless the commit below succeeds; a rolled-back rebuild
-		// leaves the previous cache intact and its digest unchanged, so the
-		// next open simply rebuilds again. On the fresh path the rollback
-		// just ends a transaction that wrote nothing.
-		defer func() { _ = tx.Rollback() }()
 		// Read the log INSIDE the write lock, and derive the events and their
 		// digest from that SINGLE read. Inside the lock: the freshness
 		// decision and the replay then describe a log snapshot no older than
@@ -171,40 +162,60 @@ func ensureCacheOnce(root string) error {
 		if err != nil {
 			return fmt.Errorf("read events log: %w", err)
 		}
-		hash := hashEvents(data)
-		got, err := loadEventsHash(tx)
-		if err != nil {
-			return err
-		}
-		if got == hash {
-			// Fresh — either it was never stale, or a contender this flock
-			// held behind it already rebuilt it. Touch nothing.
-			return nil
-		}
-		events, err := decodeEvents(data)
-		if err != nil {
-			return err
-		}
-		// Normalize event order before replay.
-		sortEvents(events)
-		// Recreate schema and replay the event log.
-		if err := resetSchema(tx); err != nil {
-			return err
-		}
-		if err := ensureSchema(tx); err != nil {
-			return err
-		}
-		if err := applyEvents(tx, events); err != nil {
-			return err
-		}
-		if err := storeEventsHash(tx, hash); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit rebuild: %w", err)
-		}
-		return nil
+		return rebuildCacheTx(db, data)
 	})
+}
+
+// rebuildCacheTx replays data into db as ONE transaction if its digest
+// differs from the cache's recorded one; a matching digest is a no-op that
+// touches nothing. It performs no locking and no I/O of its own beyond the
+// transaction — the caller supplies data already read under whatever lock
+// makes that read authoritative (ensureCacheOnce's withRebuildLock hold, or
+// AllocateChildAndAppend's events-file lock hold, which excludes every
+// writer AND reader and so needs no separate rebuild lock to be correct).
+func rebuildCacheTx(db *sql.DB, data []byte) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin rebuild: %w", err)
+	}
+	// Roll back unless the commit below succeeds; a rolled-back rebuild
+	// leaves the previous cache intact and its digest unchanged, so the
+	// next open simply rebuilds again. On the fresh path the rollback
+	// just ends a transaction that wrote nothing.
+	defer func() { _ = tx.Rollback() }()
+	hash := hashEvents(data)
+	got, err := loadEventsHash(tx)
+	if err != nil {
+		return err
+	}
+	if got == hash {
+		// Fresh — either it was never stale, or a contender this flock
+		// held behind it already rebuilt it. Touch nothing.
+		return nil
+	}
+	events, err := decodeEvents(data)
+	if err != nil {
+		return err
+	}
+	// Normalize event order before replay.
+	sortEvents(events)
+	// Recreate schema and replay the event log.
+	if err := resetSchema(tx); err != nil {
+		return err
+	}
+	if err := ensureSchema(tx); err != nil {
+		return err
+	}
+	if err := applyEvents(tx, events); err != nil {
+		return err
+	}
+	if err := storeEventsHash(tx, hash); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuild: %w", err)
+	}
+	return nil
 }
 
 // hashEvents returns a hex digest of raw events log content.

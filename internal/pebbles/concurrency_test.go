@@ -407,6 +407,98 @@ func TestManyConcurrentWritersNeverProduceATornLogRead(t *testing.T) {
 	}
 }
 
+// TestConcurrentAllocateChildAndAppendNeverDuplicates reproduces pebble
+// so-a9f's incident: NextChildIssueID picked a suffix from the cache and the
+// caller appended the consuming rename separately, so two overlapping
+// `pb dep add --type parent-child` calls could both compute and consume the
+// same suffix (production: two renames both landing on exo-72d.9, then every
+// cache rebuild aborting with "issue already exists"). AllocateChildAndAppend
+// makes the allocation and its consuming append one critical section under
+// the events-file lock, so N concurrent callers linking under the same
+// parent must produce N distinct, gapless suffixes and all succeed — never a
+// duplicate, never a partial write.
+func TestConcurrentAllocateChildAndAppendNeverDuplicates(t *testing.T) {
+	const linkers = 8
+	root := seedProject(t, "pb-parent")
+	var wg sync.WaitGroup
+	childIDs := make([]string, linkers)
+	errs := make([]error, linkers)
+	start := make(chan struct{})
+	for i := 0; i < linkers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			childID, err := AllocateChildAndAppend(root, "pb-parent", func(candidate string) ([]Event, error) {
+				ts := "2026-01-01T00:01:00Z"
+				return []Event{
+					NewCreateEvent(candidate, fmt.Sprintf("Child %d", index), "", "task", ts, 2),
+					NewDepAddEvent(candidate, "pb-parent", DepTypeParentChild, ts),
+				}, nil
+			})
+			childIDs[index] = childID
+			errs[index] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	seen := make(map[string]bool, linkers)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("linker %d failed: %v", i, err)
+		}
+		if seen[childIDs[i]] {
+			t.Fatalf("duplicate child id assigned: %s", childIDs[i])
+		}
+		seen[childIDs[i]] = true
+	}
+	if len(seen) != linkers {
+		t.Fatalf("expected %d distinct child ids, got %d", linkers, len(seen))
+	}
+	for suffix := 1; suffix <= linkers; suffix++ {
+		want := fmt.Sprintf("pb-parent.%d", suffix)
+		if !seen[want] {
+			t.Fatalf("expected contiguous suffix %s to have been assigned, got %v", want, childIDs)
+		}
+	}
+
+	// The tracker must remain fully readable after the burst: a cache
+	// rebuilt from scratch must apply the whole log without aborting.
+	if err := removeCacheFiles(DBPath(root)); err != nil {
+		t.Fatalf("remove cache: %v", err)
+	}
+	if err := EnsureCache(root); err != nil {
+		t.Fatalf("rebuild cache after burst: %v", err)
+	}
+}
+
+// TestRejectedAllocateChildAndAppendWritesNothing asserts buildEvents'
+// rejection is honored before any append: the collision/validity check must
+// precede any write so a rejected call never leaves the log in a state that
+// needs manual surgery (so-a9f).
+func TestRejectedAllocateChildAndAppendWritesNothing(t *testing.T) {
+	root := seedProject(t, "pb-reject")
+	before, err := os.ReadFile(EventsPath(root))
+	if err != nil {
+		t.Fatalf("read events log: %v", err)
+	}
+	rejectErr := fmt.Errorf("rejected by test")
+	_, err = AllocateChildAndAppend(root, "pb-reject", func(candidate string) ([]Event, error) {
+		return nil, rejectErr
+	})
+	if err == nil {
+		t.Fatal("expected AllocateChildAndAppend to fail")
+	}
+	after, err := os.ReadFile(EventsPath(root))
+	if err != nil {
+		t.Fatalf("read events log: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("rejected call wrote to the events log: before=%q after=%q", before, after)
+	}
+}
+
 // TestEventsFileLockExcludesConcurrentAccess asserts withEventsFileLock is a
 // real mutual-exclusion primitive: a second acquisition must block until the
 // first releases, never run concurrently with it.

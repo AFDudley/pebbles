@@ -11,22 +11,37 @@ import (
 // AppendEvent appends a single event to the events log.
 func AppendEvent(root string, event Event) error {
 	path := EventsPath(root)
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("marshal event: %w", err)
-	}
-	data = append(data, '\n')
 	return withEventsFileLock(path, func() error {
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+		return appendEventsLocked(path, []Event{event})
+	})
+}
+
+// appendEventsLocked appends events to the events log at path in order,
+// assuming the caller already holds the events-file lock (withEventsFileLock)
+// across this call — it takes no lock of its own, so calling it outside one
+// races every other reader and writer of the log. A concurrent reader can
+// therefore never observe a torn line between two of these writes, since
+// readEventsFile blocks on the same lock for the whole span.
+func appendEventsLocked(path string, events []Event) error {
+	if len(events) == 0 {
+		return nil
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open events log: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	for _, event := range events {
+		data, err := json.Marshal(event)
 		if err != nil {
-			return fmt.Errorf("open events log: %w", err)
+			return fmt.Errorf("marshal event: %w", err)
 		}
-		defer func() { _ = file.Close() }()
+		data = append(data, '\n')
 		if _, err := file.Write(data); err != nil {
 			return fmt.Errorf("append event: %w", err)
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // LoadEvents reads all events from the events log.
