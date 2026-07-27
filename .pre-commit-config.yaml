@@ -96,7 +96,12 @@ repos:
   - repo: https://github.com/dnephin/pre-commit-golang
     rev: v0.5.1
     hooks:
+      # Routed through a repo script for the same reason go-vet is (below):
+      # the stock entry resolves `gofmt` from the caller's PATH, which fails
+      # on push here with "gofmt not installed or available in the PATH".
       - id: go-fmt
+        entry: ./scripts/go-fmt.sh
+        language: system
       - id: go-mod-tidy
       # go-vet's stock run-go-vet.sh does `pkg=$(go list)` from the repo
       # root, which needs a .go file directly at the module root to resolve
