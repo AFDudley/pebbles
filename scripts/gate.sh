@@ -8,11 +8,10 @@
 #
 # `gate.command` in .exophial/config.yaml is an argv list, not a shell line, so
 # the `build && vet && test` conjunction lives here rather than in the config.
-# The go toolchain is installed at /usr/local/go on this host and is not on a
-# non-interactive shell's default PATH; prepend it rather than assume it.
+# The toolchain location comes from the single declaration in go-env.sh.
 set -euo pipefail
 
-export PATH="/usr/local/go/bin:${PATH}"
+. "$(dirname "$0")/go-env.sh"
 
 go build ./...
 go vet ./...

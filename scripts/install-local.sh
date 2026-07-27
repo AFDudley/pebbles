@@ -10,11 +10,10 @@
 # bug fix lands. This script closes that gap by stamping the local build the same
 # way a release is stamped.
 #
-# The go toolchain is at /usr/local/go on this host and is not on a
-# non-interactive shell's default PATH; prepend it rather than assume it.
+# The toolchain location comes from the single declaration in go-env.sh.
 set -euo pipefail
 
-export PATH="/usr/local/go/bin:${PATH}"
+. "$(dirname "$0")/go-env.sh"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_DIR="${PB_INSTALL_DIR:-$HOME/.local/bin}"

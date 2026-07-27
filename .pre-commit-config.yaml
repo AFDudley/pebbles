@@ -106,8 +106,16 @@ repos:
       # Vetting the whole module instead of the stock per-changed-directory
       # invocation sidesteps that root-package assumption and is still a
       # complete `go vet` run.
+      #
+      # The entry is a repo script, not an inline `bash -c 'go vet ./...'`,
+      # because a bare `go` resolves against whatever PATH pre-commit
+      # inherited: the inline form passed from an interactive shell but failed
+      # `git push` with "go: command not found" (exit 127), since the toolchain
+      # is not on a non-interactive PATH on this host. scripts/go-vet.sh
+      # sources the single toolchain-location declaration (scripts/go-env.sh)
+      # so the hook does not depend on the caller's environment.
       - id: go-vet
-        entry: bash -c 'go vet ./...'
+        entry: ./scripts/go-vet.sh
         language: system
         pass_filenames: false
 
