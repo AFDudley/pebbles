@@ -1,2 +1,5 @@
 .worktrees
 .scratch/
+
+# Instance-specific exophial runtime config (mirrors the upstream repo: untracked)
+.exophial/

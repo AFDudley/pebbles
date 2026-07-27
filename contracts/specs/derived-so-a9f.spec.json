@@ -1,0 +1,219 @@
+{
+  "id": "derived-so-a9f",
+  "original_statement": "Request: MECHANISM (verified by reading internal/pebbles/child_ids.go):\nNextChildIssueID(root, parentID) (child_ids.go:25) allocates a child id by (1) EnsureCache, (2) loadChildSuffixes reading the deps table from the SQLite CACHE, (3) picking the smallest free suffix and checking issueIDAvailable against the cache, then RETURNS the candidate. The caller appends the rename event SEPARATELY. No advisory lock (internal/pebbles/events_lock.go) is held across the allocate->append span, and the cache lags the append-only event log.\n\nRACE: two `pb dep add --type parent-child` calls that run close together each call NextChildIssueID and both read the same cache state (before either's rename event has been applied to the cache), so both compute the SAME suffix and both append a rename to the SAME child id. Classic check-then-act / read-modify-write without the lock held across both steps.\n\nOBSERVED: on 2026-07-24 an automated caller (exophial's decomposition, which issues sequential-but-rapid parent-child links) produced two rename events 2ms apart both targeting exo-72d.9:\n  03:17:32.079  rename exo-171 -> exo-72d.9\n  03:17:32.081  rename exo-117 -> exo-72d.9\npb had already appended BOTH the rename and its dep_add before detecting the collision and exiting 1 (a non-atomic write leaving failed operations in the log). Every subsequent cache rebuild then aborts on the duplicate id ('issue already exists: exo-72d.9'), so ALL reads fail (pb show/list/ready) \u2014 the whole bus is wedged until the two spurious events are hand-removed from events.jsonl.\n\nIMPACT: any concurrent or rapid-sequential parent-child linking can (a) assign a duplicate child id and (b) leave the event log in a state no cache rebuild can apply, taking the entire tracker down for that repo. High severity: a single collision denies all reads.\n\nROOT-CAUSE FIX (not a retry): make sub-id allocation and the rename append ONE atomic critical section under the existing events_lock advisory lock \u2014 hold the lock across NextChildIssueID + the append that consumes the returned id, so no other writer can allocate the same suffix in between. A retry-on-collision loop would be a fallback masking the non-atomicity; the allocation must be atomic with its consuming write.\n\nSECONDARY: pb should not append a rename (and its dep_add) and THEN fail on the collision \u2014 the collision check must precede any append, so a rejected dep-add leaves the log clean rather than requiring manual event surgery.\n\nREPRO: create two issues, then fire two `pb dep add --type parent-child <child> <parent>` for the same parent near-simultaneously (or fast sequential where cache apply lags); observe two renames to the same <parent>.N and a subsequently unreadable bus.",
+  "restatement": "When someone links a child issue under a parent with `pb dep add --type parent-child`, the tool picks the next free child suffix and then writes that link. Today those are two separate steps: NextChildIssueID (internal/pebbles/child_ids.go:25) runs EnsureCache, reads the deps table from the SQLite cache, picks the smallest free suffix, checks issueIDAvailable against that same cache, and returns the candidate; the caller appends the rename event afterwards. The advisory lock in internal/pebbles/events_lock.go is not held across that allocate-then-append span, and the cache lags the append-only event log, so two linking commands issued close together both read the same cache state, both compute the SAME suffix, and both append a rename to the SAME child id. This was observed on 2026-07-24: an automated caller produced `03:17:32.079 rename exo-171 -> exo-72d.9` and `03:17:32.081 rename exo-117 -> exo-72d.9`, 2ms apart. Worse, pb had already appended BOTH the rename and its dep_add before it detected the collision and exited 1, so every later cache rebuild aborts with 'issue already exists: exo-72d.9' and ALL reads (pb show/list/ready) fail until the two spurious events are hand-removed from events.jsonl \u2014 a single collision denies all reads for that repo.\n\nWhat is required: sub-id allocation and the rename append that consumes the returned id must become ONE atomic critical section held under the existing events_lock advisory lock, so no other writer can allocate the same suffix in between. A retry-on-collision loop is explicitly NOT the fix \u2014 it would mask the non-atomicity rather than remove it. Additionally, the collision check must precede any append: a rejected dep-add must leave the event log clean rather than leaving a rename plus dep_add behind that requires manual event surgery.\n\nAcceptance is behavioural, not code-shaped: fire many parent-child link commands at the same parent simultaneously and every one of them succeeds, each gets a distinct contiguous suffix, no two renames target the same child id; a link command that is rejected appends nothing at all to the event log; and after all of this the tracker is still fully readable \u2014 a cache rebuilt from scratch applies the whole log without an 'issue already exists' abort, and list/show/ready all succeed.",
+  "restatement_clauses": [
+    {
+      "id": "c1",
+      "text": "Firing N `pb dep add --type parent-child` commands simultaneously against the SAME parent must never assign a duplicate child id: no two rename events may target the same child id (as happened with two renames to exo-72d.9), and the number of distinct child ids produced must equal N."
+    },
+    {
+      "id": "c2",
+      "text": "Under that same simultaneous load every one of the N linking commands must SUCCEED (exit 0) and the suffixes assigned must be contiguous with no gaps and no duplicates \u2014 i.e. allocation and the rename append that consumes the allocated id are serialized as one atomic critical section under the existing events_lock advisory lock, never resolved by a retry-on-collision loop."
+    },
+    {
+      "id": "c3",
+      "text": "A `pb dep add --type parent-child` invocation that is REJECTED must append nothing: it exits non-zero having added ZERO events to .pebbles/events.jsonl (no rename, no dep_add), so the collision/validity check precedes any append and no manual event surgery is ever needed."
+    },
+    {
+      "id": "c4",
+      "text": "After the simultaneous linking run, the tracker must remain fully readable: a cache rebuilt from scratch applies the entire event log without aborting on 'issue already exists', and `pb list`, `pb show` and `pb ready` all exit 0."
+    }
+  ],
+  "goal": "Make parent-child child-id allocation and its rename append one atomic, all-or-nothing operation so concurrent `pb dep add --type parent-child` calls can never assign a duplicate child id or leave an unapplicable event log.",
+  "acceptance_criteria": [
+    "Eight requests to file a sub-item under the same parent are sent at the same instant; afterwards every sub-item that came back has its own distinct number, and no two of them were handed the same one.",
+    "When eight sub-items are filed under one parent all at once, all eight commands report success and the eight numbers handed out run straight through with none missing and none repeated.",
+    "A link request that the tool refuses is checked: the command reports failure, and the tracker's record file is exactly as long as it was before \u2014 nothing at all was written down for the refused request.",
+    "After eight sub-items are filed under one parent simultaneously, the tracker's index is deleted and rebuilt from scratch, and then the issue list, a single issue view, and the ready-work view are each opened \u2014 the rebuild finishes without complaining that an item already exists, and all three views come up."
+  ],
+  "request_clauses": [
+    {
+      "id": "c1",
+      "text": "Eight requests to file a sub-item under the same parent are sent at the same instant; afterwards every sub-item that came back has its own distinct number, and no two of them were handed the same one."
+    },
+    {
+      "id": "c2",
+      "text": "When eight sub-items are filed under one parent all at once, all eight commands report success and the eight numbers handed out run straight through with none missing and none repeated."
+    },
+    {
+      "id": "c3",
+      "text": "A link request that the tool refuses is checked: the command reports failure, and the tracker's record file is exactly as long as it was before \u2014 nothing at all was written down for the refused request."
+    },
+    {
+      "id": "c4",
+      "text": "After eight sub-items are filed under one parent simultaneously, the tracker's index is deleted and rebuilt from scratch, and then the issue list, a single issue view, and the ready-work view are each opened \u2014 the rebuild finishes without complaining that an item already exists, and all three views come up."
+    }
+  ],
+  "acceptance_tests": [
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c1",
+      "description": "Eight requests to file a sub-item under the same parent are sent at the same instant; afterwards every sub-item that came back has its own distinct number, and no two of them were handed the same one.",
+      "proves": "Proves the duplicate-child-id collision from the 2026-07-24 incident (two items both renamed to exo-72d.9) can no longer happen when linking commands overlap.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_concurrent_child_ids.py",
+        "args": [
+          "--concurrency",
+          "8"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "duplicate_child_ids",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "distinct_child_ids",
+          "op": "eq",
+          "value": 8
+        },
+        {
+          "observe": "exit_code",
+          "field": "exit_code",
+          "op": "eq",
+          "value": 0
+        }
+      ],
+      "max_runs": 5,
+      "timeout_seconds": 180,
+      "clause_id": "c1"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c2",
+      "description": "When eight sub-items are filed under one parent all at once, all eight commands report success and the eight numbers handed out run straight through with none missing and none repeated.",
+      "proves": "Proves the numbering and the writing of the link happen as one indivisible step, so overlapping writers are serialized rather than colliding and being patched up afterwards.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_child_suffix_allocation.py",
+        "args": [
+          "--concurrency",
+          "8"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "commands_succeeded",
+          "op": "eq",
+          "value": 8
+        },
+        {
+          "observe": "stdout_json",
+          "field": "commands_failed",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "distinct_suffixes",
+          "op": "eq",
+          "value": 8
+        },
+        {
+          "observe": "stdout_json",
+          "field": "suffix_gaps",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "exit_code",
+          "field": "exit_code",
+          "op": "eq",
+          "value": 0
+        }
+      ],
+      "max_runs": 5,
+      "timeout_seconds": 180,
+      "clause_id": "c2"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c3",
+      "description": "A link request that the tool refuses is checked: the command reports failure, and the tracker's record file is exactly as long as it was before \u2014 nothing at all was written down for the refused request.",
+      "proves": "Proves a rejected link leaves the tracker's records untouched, so no one ever has to hand-edit the record file to undo a half-written operation.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_rejected_link_writes_nothing.py",
+        "args": [],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "cli_exit_code",
+          "op": "ne",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "events_appended",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "exit_code",
+          "field": "exit_code",
+          "op": "eq",
+          "value": 0
+        }
+      ],
+      "max_runs": 3,
+      "timeout_seconds": 120,
+      "clause_id": "c3"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c4",
+      "description": "After eight sub-items are filed under one parent simultaneously, the tracker's index is deleted and rebuilt from scratch, and then the issue list, a single issue view, and the ready-work view are each opened \u2014 the rebuild finishes without complaining that an item already exists, and all three views come up.",
+      "proves": "Proves a burst of linking activity can no longer wedge the tracker into a state where every read fails, which was the whole-repo outage in the reported incident.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_tracker_readable_after_burst.py",
+        "args": [
+          "--concurrency",
+          "8"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "rebuild_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "duplicate_id_error_seen",
+          "op": "eq",
+          "value": false
+        },
+        {
+          "observe": "stdout_json",
+          "field": "read_commands_succeeded",
+          "op": "eq",
+          "value": 3
+        },
+        {
+          "observe": "exit_code",
+          "field": "exit_code",
+          "op": "eq",
+          "value": 0
+        }
+      ],
+      "max_runs": 3,
+      "timeout_seconds": 180,
+      "clause_id": "c4"
+    }
+  ],
+  "criticality": "marginal",
+  "verification_level": "bounded_model_check"
+}

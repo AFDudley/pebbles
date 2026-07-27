@@ -1,0 +1,12 @@
+{
+  "git_remote": "origin",
+  "subtrees": [],
+  "pebble_tracker_prefixes": {
+    "root": "so-"
+  },
+  "commit_trailer_categories": ["hygiene", "refactor", "docs", "infrastructure", "pebble-filing"],
+  "gate_commands": {
+    "root": "./scripts/gate.sh"
+  },
+  "deploy_surfaces": {}
+}
