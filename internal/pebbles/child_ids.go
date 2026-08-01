@@ -3,7 +3,6 @@ package pebbles
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -92,11 +91,12 @@ func AllocateChildAndAppend(root, parentID string, buildEvents func(childID stri
 	eventsPath := EventsPath(root)
 	var childID string
 	err := withEventsFileLock(eventsPath, func() error {
-		// Holding the events-file lock excludes every other reader and
+		// Holding the events-file lock excludes every other pb reader and
 		// writer of the log (readEventsFile/AppendEvent take the same
-		// lock), so a plain unlocked read here is exactly as current as any
-		// lock-protected read could be.
-		data, err := os.ReadFile(eventsPath)
+		// lock), so no second lock acquisition is needed here — but the
+		// settled-content trim still is, against non-pb appenders that
+		// never take the lock (so-2a4, see readEventsLocked).
+		data, err := readEventsLocked(eventsPath)
 		if err != nil {
 			return fmt.Errorf("read events log: %w", err)
 		}

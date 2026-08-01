@@ -58,19 +58,58 @@ func readEvents(path string) ([]Event, error) {
 	return decodeEvents(data)
 }
 
-// readEventsFile reads the raw events log content under the same lock
+// readEventsFile reads the settled events log content under the same lock
 // AppendEvent writes under (see withEventsFileLock).
 func readEventsFile(path string) ([]byte, error) {
 	var data []byte
 	err := withEventsFileLock(path, func() error {
 		var readErr error
-		data, readErr = os.ReadFile(path)
+		data, readErr = readEventsLocked(path)
 		return readErr
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open events log: %w", err)
 	}
 	return data, nil
+}
+
+// readEventsLocked reads the events log's SETTLED content — appendEventsLocked's
+// read-side sibling: the caller already holds whatever lock makes the read
+// authoritative (or accepts a snapshot without one).
+//
+// Settled means truncated to the last terminating newline (settledEventData).
+// pb's own flock cannot make a read torn-proof, because not every writer of
+// .pebbles/events.jsonl is pb: pebble so-2a4's production tear happened with
+// fd6e05a/so-b6a's reader+writer flock fully in place, torn by concurrent
+// writers (a git merge driver, a dispatcher) that never take the .lock
+// sibling. The reader itself must therefore be correct under a concurrent
+// append, whoever the appender is.
+func readEventsLocked(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return settledEventData(data), nil
+}
+
+// settledEventData returns the prefix of data covering only fully-appended
+// events (pebble so-2a4). Every log writer terminates each event line with
+// '\n' as the last byte of a single write, so content after the last newline
+// is exactly one append still in flight — not yet part of the log, observable
+// only mid-write. It is dropped here, at the read boundary, BEFORE any parse
+// or digest: the same "wholly before the append" view the flock gives against
+// pb's own writers, extended to writers that never take the lock. Nothing is
+// ever lost — the log is append-only, so the next read after the append's
+// newline lands sees the whole event. A malformed line that IS terminated
+// (interior or final) is untouched by this trim and stays a loud parse error
+// in decodeEvents/readEventLog: fully-appended garbage is corruption, not an
+// append in flight.
+func settledEventData(data []byte) []byte {
+	if len(data) == 0 || data[len(data)-1] == '\n' {
+		return data
+	}
+	last := bytes.LastIndexByte(data, '\n')
+	return data[:last+1]
 }
 
 // decodeEvents decodes raw JSONL events log content.
