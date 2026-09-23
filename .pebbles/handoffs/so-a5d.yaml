@@ -1,0 +1,81 @@
+status: completed
+pebble_id: so-a5d
+summary: >
+  Fixed pb's three unbuffered event-log readers (internal/pebbles/log.go's
+  readEventLog, internal/pebbles/events.go's decodeEvents, and
+  cmd/pb/log.go's caller of it) so a well-formed events.jsonl line up to
+  5 MiB reads normally instead of failing the whole log at the old 64 KiB
+  bufio.Scanner default. Both readers now split the log themselves
+  (new internal/pebbles/event_lines.go, shared by both) instead of using a
+  fixed-size scanner token, so there is no scan buffer to exceed. A line
+  over 5 MiB is named by its 1-based line number and skipped rather than
+  failing the read: decodeEvents reports it on stderr since it feeds the
+  SQLite cache every pb verb reads, and readEventLog returns it to
+  cmd/pb/log.go which prints the same warning for `pb log`. Verified with
+  Go unit tests (TestSplitEventLinesReportsOversizedLineByNumber,
+  TestSplitEventLinesAcceptsExactlyMaxSize,
+  TestReadEventLogSkipsOversizedLineAndReportsIt,
+  TestLoadEventsSkipsOversizedLine, plus the pre-existing malformed-line
+  tests, all green) and with all five of the spec's real acceptance
+  oracles run against the built pb binary, each matching every `then`
+  predicate in contracts/specs/derived-so-a5d.spec.json. Confirmed
+  red-before-green by running three of the five oracles against base
+  commit d45d16c in a detached worktree: they failed there with the exact
+  "token too long" text pb printed in production, then passed against
+  this branch.
+cost: "~230k tokens"
+commits:
+  - "eb80aa3a96bd54407d887355f758a59d9bbee96c"
+verify_transcript:
+  hooks:
+    - name: claude-md-coverage
+      outcome: passed
+      duration_s: 0.31
+    - name: trailing-whitespace
+      outcome: passed
+      duration_s: 0.27
+    - name: end-of-file-fixer
+      outcome: passed
+      duration_s: 0.28
+    - name: check-added-large-files
+      outcome: passed
+      duration_s: 0.31
+    - name: check-merge-conflict
+      outcome: passed
+      duration_s: 0.37
+    - name: check-case-conflict
+      outcome: passed
+      duration_s: 0.34
+    - name: mixed-line-ending
+      outcome: passed
+      duration_s: 0.41
+    - name: go-fmt
+      outcome: passed
+      duration_s: 0.29
+    - name: go-mod-tidy
+      outcome: passed
+      duration_s: 0.31
+    - name: go-vet
+      outcome: passed
+      duration_s: 2.17
+    - name: golangci-lint
+      outcome: passed
+      duration_s: 1.89
+    - name: tdd-trailer
+      outcome: passed
+      duration_s: 0.26
+    - name: check-subtree-edits
+      outcome: passed
+      duration_s: 0.31
+e2e_gate:
+  spec: contracts/specs/derived-so-a5d.spec.json
+  command: >-
+    python3 scripts/oracle_oversized_line_show.py --line-bytes 89282 &&
+    python3 scripts/oracle_oversized_line_list_ready.py --line-bytes 89282
+    --pebble-count 3 && python3 scripts/oracle_five_mib_line_show.py
+    --line-bytes 5242000 && python3 scripts/oracle_overlimit_line_reported.py
+    --line-bytes 6291456 --line-number 7 --pebble-count 3 && python3
+    scripts/oracle_oversized_line_log_verb.py --line-bytes 89282
+  result: passed
+  ran_at_sha: "eb80aa3"
+  mocks_in_path: false
