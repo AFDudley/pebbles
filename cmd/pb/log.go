@@ -128,9 +128,12 @@ func runLog(root string, args []string) {
 	if err != nil {
 		exitError(err)
 	}
-	entries, err := pebbles.LoadEventLog(root)
+	entries, oversized, err := pebbles.LoadEventLog(root)
 	if err != nil {
 		exitError(err)
+	}
+	for _, over := range oversized {
+		fmt.Fprintf(os.Stderr, "pb: skipping events log line %d: %d bytes is over the readable line size\n", over.Line, over.Size)
 	}
 	titles, err := issueTitleMap(root)
 	if err != nil {

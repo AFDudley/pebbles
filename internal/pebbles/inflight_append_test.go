@@ -63,7 +63,7 @@ func TestReaderToleratesInFlightFinalAppend(t *testing.T) {
 	if len(events) != 4 {
 		t.Fatalf("expected 4 settled events, got %d", len(events))
 	}
-	entries, err := LoadEventLog(root)
+	entries, _, err := LoadEventLog(root)
 	if err != nil {
 		t.Fatalf("LoadEventLog during in-flight append failed: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestMalformedInteriorLineStaysLoud(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "parse event") {
 		t.Fatalf("expected a parse error naming the event, got: %v", err)
 	}
-	_, err := LoadEventLog(root)
+	_, _, err := LoadEventLog(root)
 	if err == nil {
 		t.Fatal("LoadEventLog silently skipped a malformed interior line")
 	}

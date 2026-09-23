@@ -1,11 +1,8 @@
 package pebbles
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 // EventLogEntry pairs an event with its line number in the log.
@@ -14,36 +11,29 @@ type EventLogEntry struct {
 	Event Event
 }
 
-// LoadEventLog reads the event log and returns entries with line numbers.
-func LoadEventLog(root string) ([]EventLogEntry, error) {
+// LoadEventLog reads the event log and returns entries with line numbers,
+// plus any line too large to read (see OversizedEventLine).
+func LoadEventLog(root string) ([]EventLogEntry, []OversizedEventLine, error) {
 	return readEventLog(EventsPath(root))
 }
 
-// readEventLog reads a JSONL log file and records line numbers for each event.
-func readEventLog(path string) ([]EventLogEntry, error) {
+// readEventLog reads a JSONL log file and records line numbers for each
+// event. A line over maxEventLineBytes is reported back in oversized rather
+// than treated as a read failure, so the rest of the log still comes back.
+func readEventLog(path string) ([]EventLogEntry, []OversizedEventLine, error) {
 	data, err := readEventsFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// Scan the log line by line to capture line numbers.
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	lines, oversized := splitEventLines(data)
 	var entries []EventLogEntry
-	lineNumber := 0
-	for scanner.Scan() {
-		lineNumber++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
+	for _, line := range lines {
 		// Decode JSON into an Event, reporting the line on errors.
 		var event Event
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
-			return nil, fmt.Errorf("parse event line %d: %w", lineNumber, err)
+		if err := json.Unmarshal(line.Text, &event); err != nil {
+			return nil, nil, fmt.Errorf("parse event line %d: %w", line.Number, err)
 		}
-		entries = append(entries, EventLogEntry{Line: lineNumber, Event: event})
+		entries = append(entries, EventLogEntry{Line: line.Number, Event: event})
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan events log: %w", err)
-	}
-	return entries, nil
+	return entries, oversized, nil
 }

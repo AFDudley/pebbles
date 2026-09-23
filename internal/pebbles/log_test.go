@@ -18,7 +18,7 @@ func TestLoadEventLog(t *testing.T) {
 	if err := AppendEvent(root, NewStatusEvent(issueID, "in_progress", "2024-02-01T00:01:00Z")); err != nil {
 		t.Fatalf("append status: %v", err)
 	}
-	entries, err := LoadEventLog(root)
+	entries, _, err := LoadEventLog(root)
 	if err != nil {
 		t.Fatalf("load event log: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestLoadEventLogSkipsBlankLines(t *testing.T) {
 	if err := AppendEvent(root, NewCloseEvent(issueID, "2024-02-02T13:00:00Z")); err != nil {
 		t.Fatalf("append close: %v", err)
 	}
-	entries, err := LoadEventLog(root)
+	entries, _, err := LoadEventLog(root)
 	if err != nil {
 		t.Fatalf("load event log: %v", err)
 	}

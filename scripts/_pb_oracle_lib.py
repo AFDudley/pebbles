@@ -86,6 +86,36 @@ def remove_cache_files(project_dir: str) -> None:
             os.remove(path)
 
 
+def build_padded_comment_line(issue_id: str, target_bytes: int, timestamp: str = "2026-01-01T00:00:00Z") -> str:
+    """Builds one well-formed comment-event JSONL line of exactly target_bytes.
+
+    The comment body is padded with ASCII filler so the compact-encoded line
+    (no trailing newline) is exactly target_bytes long, letting an oracle
+    reproduce a line of a precise, chosen size in the events log.
+    """
+    event = {"type": "comment", "timestamp": timestamp, "issue_id": issue_id, "payload": {"body": ""}}
+    base_len = len(json.dumps(event, separators=(",", ":")).encode())
+    padding = target_bytes - base_len
+    if padding < 0:
+        raise ValueError(f"target_bytes {target_bytes} is smaller than the minimum line size {base_len}")
+    event["payload"]["body"] = "x" * padding
+    line = json.dumps(event, separators=(",", ":"))
+    if len(line.encode()) != target_bytes:
+        raise RuntimeError(f"built line of {len(line.encode())} bytes, expected {target_bytes}")
+    return line
+
+
+def append_raw_lines(project_dir: str, lines: list[str]) -> None:
+    """Appends lines directly to events.jsonl, bypassing pb's own writer.
+
+    Used to place a line of a precise byte length at a precise line number,
+    which pb's own append commands (create/comment/...) cannot control.
+    """
+    with open(events_path(project_dir), "a") as f:
+        for line in lines:
+            f.write(line + "\n")
+
+
 def launch_concurrent(binary_path: str, project_dir: str, argv_list: list[list[str]]) -> list[subprocess.CompletedProcess]:
     """Starts every command in argv_list before waiting on any of them, so
     they run as genuinely concurrent OS processes rather than one at a time.

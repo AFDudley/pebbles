@@ -1,7 +1,6 @@
 package pebbles
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -117,24 +116,26 @@ func settledEventData(data []byte) []byte {
 // Decoding from bytes rather than a file handle lets a caller derive both the
 // events and their digest from one read of the log, leaving no window for a
 // concurrent append to land between the two (see EnsureCache).
+//
+// A line over maxEventLineBytes is reported to the operator on stderr, named
+// by its line number, and skipped rather than failing the whole decode:
+// decodeEvents feeds the derived-state cache (EnsureCache), which every pb
+// verb reads, so a hard failure here makes every pebble on the bus
+// unreadable over one oversized line. The warning keeps that loss visible
+// instead of silent.
 func decodeEvents(data []byte) ([]Event, error) {
-	// Scan the content line by line to decode JSONL records.
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	lines, oversized := splitEventLines(data)
+	for _, over := range oversized {
+		fmt.Fprintf(os.Stderr, "pb: skipping events log line %d: %d bytes is over the readable line size\n", over.Line, over.Size)
+	}
 	var events []Event
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	for _, line := range lines {
 		// Decode each event line into the Event struct.
 		var event Event
-		if err := json.Unmarshal(line, &event); err != nil {
-			return nil, fmt.Errorf("parse event: %w", err)
+		if err := json.Unmarshal(line.Text, &event); err != nil {
+			return nil, fmt.Errorf("parse event line %d: %w", line.Number, err)
 		}
 		events = append(events, event)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan events log: %w", err)
 	}
 	return events, nil
 }
