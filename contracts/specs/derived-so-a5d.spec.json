@@ -1,0 +1,258 @@
+{
+  "id": "derived-so-a5d",
+  "original_statement": "What did you do? List the exact steps to reproduce, in order. An exophial4 events.jsonl carried one valid JSON event line of 89282 bytes (a comment on 4ex-87f). Ran: pb show 4ex-7347 and pb show 4ex-87f in /home/rix/code/git_puller/repos/exophial4.\nWhat did you expect to happen? pb reads every well-formed line of the append-only log, whatever its length, as internal/pebbles/beads_import.go:138 already does for the beads importer: scanner.Buffer(make([]byte, 0, 64*1024), 5*1024*1024). A line pb cannot read is reported with its line number, and the other pebbles on the bus stay readable.\nWhat actually happened? Include the exact error text or output. Both commands printed 'Error: scan events log: bufio.Scanner: token too long' and nothing else. internal/pebbles/log.go:29 creates bufio.NewScanner(bytes.NewReader(data)) with no scanner.Buffer call, so the default 64 KiB MaxScanTokenSize applies; scanner.Err() returns ErrTooLong and readEventLog returns an error for the whole log. After the one line was truncated to 3297 bytes, pb show worked for every pebble. The same unbuffered pattern is in internal/pebbles/events.go:50 and cmd/pb/log.go:810 on the worker-so-b08 branch.\nWhich surface or component? (e.g. gateway route, mobile screen, CLI verb) internal/pebbles/log.go readEventLog (and the parallel scanners in internal/pebbles/events.go and cmd/pb/log.go); every pb verb that reads the log\nWhat environment and version? (OS, app/gateway build or commit, network) pb at /home/rix/.local/bin/pb; pebbles source at /home/rix/code/git_puller/repos/pebbles (HEAD 798f5d0); bus exophial4/.pebbles/events.jsonl\nIs it reproducible? (always / intermittently / once) \u2014 and how often. always, for any events.jsonl line over 65536 bytes\nWhat is the impact / severity? Who is blocked and how badly? One oversized line anywhere in a bus makes pb show, pb list and pb ready fail for every pebble on that bus; on exophial4 this lasted about three hours and made status checks report pebbles as empty. The error names no line, so the operator cannot find the offending entry through pb.\nWhat activity was underway when this was found? (ODC Activity \u2014 e.g. testing, code review, normal usage, reproduction attempt) Checking pebble dependencies on the exophial4 bus\nWhat condition or event exposed the defect? (ODC Trigger \u2014 e.g. a config change, concurrent access, a boundary/edge-case input, an unusual workload) An events.jsonl line over 64 KiB written by exophial's integrator (filed there as exo-470b)\nWhich quality/capability dimension does this affect? (ODC Impact \u2014 e.g. reliability, usability, capability, performance, security, maintainability, standards, requirements \u2014 distinct from the severity/who's-blocked question above) Reliability of the log reader: one line over the scanner's size limit makes the whole valid log unreadable",
+  "restatement": "pb must read an append-only pebbles event log whatever the length of its lines. Today pb builds its line reader with the standard 64 KiB limit. One valid event line over 65536 bytes makes the whole read fail. The operator then sees only 'Error: scan events log: bufio.Scanner: token too long' and no pebbles at all. On the exophial4 bus one 89282-byte comment line made pb show, pb list and pb ready fail for every pebble for about three hours. The error names no line, so the operator cannot find the large entry through pb. This request asks for one reader change with three parts. First, pb reads a well-formed line of any length up to 5*1024*1024 bytes. That is the same buffer the beads importer already sets at internal/pebbles/beads_import.go:138. Second, pb keeps every other pebble on the bus readable when one line is still too long. Third, pb reports a line it cannot read by that line's number. The change covers every reader of the log, not only readEventLog at internal/pebbles/log.go:29. The parallel readers at internal/pebbles/events.go:50 and cmd/pb/log.go:810 carry the same defect and get the same fix.",
+  "restatement_clauses": [
+    {
+      "id": "c1",
+      "text": "pb show succeeds for a pebble on a bus whose events.jsonl carries one well-formed JSON event line of 89282 bytes. pb show does not print 'Error: scan events log: bufio.Scanner: token too long'."
+    },
+    {
+      "id": "c2",
+      "text": "pb list and pb ready print every ordinary pebble on a bus that carries an 89282-byte line. They do not fail for every pebble and do not report the bus as empty."
+    },
+    {
+      "id": "c3",
+      "text": "Every reader of the log accepts a line up to 5*1024*1024 bytes, the same buffer internal/pebbles/beads_import.go:138 sets with scanner.Buffer(make([]byte, 0, 64*1024), 5*1024*1024)."
+    },
+    {
+      "id": "c4",
+      "text": "When one line is over the 5 MiB buffer, pb reports that line by its line number. pb still prints the other pebbles on the bus."
+    },
+    {
+      "id": "c5",
+      "text": "The same fix covers the parallel scanners at internal/pebbles/events.go:50 and cmd/pb/log.go:810, so the pb log verb also reads a bus that carries an 89282-byte line."
+    }
+  ],
+  "goal": "Make every pb reader of the pebbles event log accept a well-formed line up to 5 MiB, name by line number any line it still cannot read, and keep the rest of the bus readable.",
+  "acceptance_criteria": [
+    "On a throwaway bus whose event file holds one valid entry of 89282 bytes, asking pb to show a pebble prints that pebble's title and prints no 'token too long' error.",
+    "On that same bus, which holds three ordinary pebbles plus the 89282-byte entry, the list command and the ready command both finish without error and the list names all three pebbles.",
+    "On a bus whose event file holds one valid entry of 5242000 bytes, just under five megabytes, pb still shows the pebble that entry belongs to and prints no 'token too long' error.",
+    "On a bus whose seventh line is 6291456 bytes, over the five megabyte size, pb names line 7 as the line it cannot read and still names the three other pebbles on that bus.",
+    "On the bus that holds the 89282-byte entry, the pb log command prints the event history and prints no 'token too long' error."
+  ],
+  "request_clauses": [
+    {
+      "id": "c1",
+      "text": "On a throwaway bus whose event file holds one valid entry of 89282 bytes, asking pb to show a pebble prints that pebble's title and prints no 'token too long' error."
+    },
+    {
+      "id": "c2",
+      "text": "On that same bus, which holds three ordinary pebbles plus the 89282-byte entry, the list command and the ready command both finish without error and the list names all three pebbles."
+    },
+    {
+      "id": "c3",
+      "text": "On a bus whose event file holds one valid entry of 5242000 bytes, just under five megabytes, pb still shows the pebble that entry belongs to and prints no 'token too long' error."
+    },
+    {
+      "id": "c4",
+      "text": "On a bus whose seventh line is 6291456 bytes, over the five megabyte size, pb names line 7 as the line it cannot read and still names the three other pebbles on that bus."
+    },
+    {
+      "id": "c5",
+      "text": "On the bus that holds the 89282-byte entry, the pb log command prints the event history and prints no 'token too long' error."
+    }
+  ],
+  "acceptance_tests": [
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c1",
+      "description": "On a throwaway bus whose event file holds one valid entry of 89282 bytes, asking pb to show a pebble prints that pebble's title and prints no 'token too long' error.",
+      "proves": "Proves pb no longer stops at the 64 KiB line limit, so one large entry no longer hides a pebble.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_oversized_line_show.py",
+        "args": [
+          "--line-bytes",
+          "89282"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "show_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "token_too_long_in_output",
+          "op": "eq",
+          "value": false
+        },
+        {
+          "observe": "stdout_json",
+          "field": "pebble_title_printed",
+          "op": "eq",
+          "value": true
+        }
+      ],
+      "max_runs": 1,
+      "timeout_seconds": 60,
+      "clause_id": "c1"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c2",
+      "description": "On that same bus, which holds three ordinary pebbles plus the 89282-byte entry, the list command and the ready command both finish without error and the list names all three pebbles.",
+      "proves": "Proves one large entry no longer makes the whole bus report as empty, so status checks stay truthful.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_oversized_line_list_ready.py",
+        "args": [
+          "--line-bytes",
+          "89282",
+          "--pebble-count",
+          "3"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "list_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "ready_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "listed_pebble_count",
+          "op": "eq",
+          "value": 3
+        },
+        {
+          "observe": "stdout_json",
+          "field": "ready_pebble_count",
+          "op": "ge",
+          "value": 1
+        }
+      ],
+      "max_runs": 1,
+      "timeout_seconds": 60,
+      "clause_id": "c2"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c3",
+      "description": "On a bus whose event file holds one valid entry of 5242000 bytes, just under five megabytes, pb still shows the pebble that entry belongs to and prints no 'token too long' error.",
+      "proves": "Proves pb accepts a line up to the five megabyte size the beads importer already accepts, not merely a line a little over 64 KiB.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_five_mib_line_show.py",
+        "args": [
+          "--line-bytes",
+          "5242000"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "show_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "token_too_long_in_output",
+          "op": "eq",
+          "value": false
+        }
+      ],
+      "max_runs": 1,
+      "timeout_seconds": 120,
+      "clause_id": "c3"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c4",
+      "description": "On a bus whose seventh line is 6291456 bytes, over the five megabyte size, pb names line 7 as the line it cannot read and still names the three other pebbles on that bus.",
+      "proves": "Proves a line pb cannot read costs the operator only that one line, and that the message tells the operator where the line is.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_overlimit_line_reported.py",
+        "args": [
+          "--line-bytes",
+          "6291456",
+          "--line-number",
+          "7",
+          "--pebble-count",
+          "3"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "reported_line_number",
+          "op": "eq",
+          "value": 7
+        },
+        {
+          "observe": "stdout_json",
+          "field": "listed_pebble_count",
+          "op": "eq",
+          "value": 3
+        }
+      ],
+      "max_runs": 1,
+      "timeout_seconds": 120,
+      "clause_id": "c4"
+    },
+    {
+      "type": "behavior",
+      "restatement_clause_id": "c5",
+      "description": "On the bus that holds the 89282-byte entry, the pb log command prints the event history and prints no 'token too long' error.",
+      "proves": "Proves the fix reaches the other two readers of the log, not only the one the operator first hit.",
+      "when": {
+        "interpreter": "python3",
+        "script": "scripts/oracle_oversized_line_log_verb.py",
+        "args": [
+          "--line-bytes",
+          "89282"
+        ],
+        "stdin": ""
+      },
+      "then": [
+        {
+          "observe": "stdout_json",
+          "field": "log_exit_code",
+          "op": "eq",
+          "value": 0
+        },
+        {
+          "observe": "stdout_json",
+          "field": "token_too_long_in_output",
+          "op": "eq",
+          "value": false
+        },
+        {
+          "observe": "stdout_json",
+          "field": "printed_event_count",
+          "op": "ge",
+          "value": 1
+        }
+      ],
+      "max_runs": 1,
+      "timeout_seconds": 60,
+      "clause_id": "c5"
+    }
+  ],
+  "criticality": "marginal",
+  "verification_level": "bounded_model_check",
+  "declared_new_entrypoints": [
+    "scripts/oracle_five_mib_line_show.py",
+    "scripts/oracle_overlimit_line_reported.py",
+    "scripts/oracle_oversized_line_list_ready.py",
+    "scripts/oracle_oversized_line_log_verb.py",
+    "scripts/oracle_oversized_line_show.py"
+  ]
+}
