@@ -1,3 +1,4 @@
 pebbles.db
 events.jsonl.lock
 pebbles.db.rebuild.lock
+reducer_ledger.jsonl
