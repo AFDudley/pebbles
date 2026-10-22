@@ -17,7 +17,7 @@ Over time that simple interface grew increasingly complex, and that complexity l
 
 It seemed that with each release there was another state tracking file in the .beads directory. Daemon mode was introduced. Syncing needed to happen on a different branch lest the main branch be polluted with beads commits. The `bd doctor --fix` command needed to be run constantly to fix issues (it rarely worked, if ever). There was always an untracked `issues.jsonl` file causing merge conflicts. I found myself constantly fighting with `beads` when I wanted to be doing real work.
 
-Much of this likely had to do with Steve Yegge's vision for Gas Town. `beads` kept growing new features — a likely source of the above complexity — and not only did I have no use for them, they make made my experience significantly worse. 
+Much of this likely had to do with Steve Yegge's vision for Gas Town. `beads` kept growing new features — a likely source of the above complexity — and not only did I have no use for them, they make made my experience significantly worse.
 
 Hence, `pebbles`: it's like `beads`, but with fewer features and a simpler architecture.
 

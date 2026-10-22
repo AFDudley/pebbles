@@ -19,7 +19,7 @@ OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 
 case "$OS" in
-  darwin|linux) ;; 
+  darwin|linux) ;;
   *)
     echo "unsupported OS: $OS" >&2
     exit 1
@@ -27,8 +27,8 @@ case "$OS" in
 esac
 
 case "$ARCH" in
-  x86_64|amd64) ARCH="amd64" ;; 
-  arm64|aarch64) ARCH="arm64" ;; 
+  x86_64|amd64) ARCH="amd64" ;;
+  arm64|aarch64) ARCH="arm64" ;;
   *)
     echo "unsupported architecture: $ARCH" >&2
     exit 1
