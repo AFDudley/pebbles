@@ -1,0 +1,66 @@
+name: Integrate
+
+# The reducer (exophiald) advances `integrated`. This fast-forwards `master`
+# onto it -- the counterpart to exophial's own `ff-main-from-integrated.yml`,
+# adapted for THIS repo's branch name (`master`, not `main`) and with no
+# release job (pebbles ships a binary via its own release process, not a
+# wheel built off this fast-forward).
+#
+# Uses the default GITHUB_TOKEN, not a deploy key: unlike exophial's own
+# `main` (which carries a ruleset whose `update` rule blocks every writer
+# except a deploy key), `master` here carries no ruleset and no branch
+# protection (checked via `gh api repos/AFDudley/pebbles/rulesets` -> `[]`
+# and `gh api repos/AFDudley/pebbles/branches/master/protection` -> 404
+# "Branch not protected"), so the token can push it directly.
+
+on:
+  push:
+    branches:
+      - integrated
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fast-forward:
+    runs-on: ubuntu-latest
+    concurrency:
+      # One fast-forward at a time; a queued run would race the ref it advances.
+      group: ff-master
+      cancel-in-progress: false
+    outputs:
+      sha: ${{ steps.ff.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ github.token }}
+
+      - name: Fast-forward master onto integrated
+        id: ff
+        run: |
+          set -euo pipefail
+          git fetch origin master integrated
+
+          INTEGRATED=$(git rev-parse origin/integrated)
+          MASTER=$(git rev-parse origin/master)
+          echo "integrated = ${INTEGRATED}"
+          echo "master     = ${MASTER}"
+          echo "sha=${INTEGRATED}" >> "${GITHUB_OUTPUT}"
+
+          if [ "${INTEGRATED}" = "${MASTER}" ]; then
+            echo "Already equal; nothing to fast-forward."
+            exit 0
+          fi
+
+          # Checked explicitly so the failure names the real problem rather than
+          # surfacing as a bare push rejection.
+          if ! git merge-base --is-ancestor "${MASTER}" "${INTEGRATED}"; then
+            echo "::error::master (${MASTER}) is NOT an ancestor of integrated (${INTEGRATED})."
+            echo "::error::Someone wrote to master directly. Refusing to merge or force."
+            exit 1
+          fi
+
+          git push origin "${INTEGRATED}:refs/heads/master"
+          echo "master fast-forwarded to ${INTEGRATED}"
