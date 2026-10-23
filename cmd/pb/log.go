@@ -111,7 +111,7 @@ func runLog(root string, args []string) {
 	table := fs.Bool("table", false, "Use table output")
 	noPager := fs.Bool("no-pager", false, "Disable pager")
 	jsonOut := fs.Bool("json", false, "Output JSON lines")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Ensure the event log is available before reading.
 	if err := ensureProject(root); err != nil {
 		exitError(err)

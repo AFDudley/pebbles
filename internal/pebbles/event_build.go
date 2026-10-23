@@ -36,8 +36,20 @@ func NewCloseEvent(issueID, timestamp string) Event {
 }
 
 // NewCommentEvent builds a comment event.
-func NewCommentEvent(issueID, body, timestamp string) Event {
-	payload := map[string]string{"body": body}
+//
+// typed supplies typed payload keys alongside "body" (see IssueComment.Payload).
+// A "body" key in typed is ignored — the body argument is authoritative, so
+// typed can never blank the one field applyComment requires. A nil/empty typed
+// yields exactly the historical {"body": ...} payload, byte-identical on the wire.
+func NewCommentEvent(issueID, body, timestamp string, typed map[string]string) Event {
+	payload := make(map[string]string, len(typed)+1)
+	for key, value := range typed {
+		if key == "body" {
+			continue
+		}
+		payload[key] = value
+	}
+	payload["body"] = body
 	return Event{Type: EventTypeComment, Timestamp: timestamp, IssueID: issueID, Payload: payload}
 }
 

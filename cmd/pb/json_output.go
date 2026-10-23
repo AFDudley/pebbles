@@ -22,9 +22,12 @@ type issueJSON struct {
 }
 
 // issueCommentJSON represents a single comment entry in JSON output.
+//
+// Payload is omitempty, so an ordinary comment's JSON is unchanged byte-for-byte.
 type issueCommentJSON struct {
-	Body      string `json:"body"`
-	Timestamp string `json:"timestamp"`
+	Body      string            `json:"body"`
+	Timestamp string            `json:"timestamp"`
+	Payload   map[string]string `json:"payload,omitempty"`
 }
 
 // issueDetailJSON describes the JSON payload for pb show output.
@@ -111,18 +114,26 @@ func buildIssueCommentsJSON(comments []pebbles.IssueComment) []issueCommentJSON 
 		converted = append(converted, issueCommentJSON{
 			Body:      comment.Body,
 			Timestamp: comment.Timestamp,
+			Payload:   comment.Payload,
 		})
 	}
 	return converted
 }
 
-// issueJSONWithDeps loads deps for an issue and returns JSON-ready fields.
-func issueJSONWithDeps(root string, issue pebbles.Issue) (issueJSON, error) {
-	_, deps, err := pebbles.GetIssue(root, issue.ID)
+// issueJSONEntries builds the list/ready JSON payload for a set of issues,
+// loading every issue's deps in ONE pass. The per-issue form this replaced
+// called pebbles.GetIssue per entry, and each of those re-read and re-hashed
+// the entire events log (see pebbles.ListIssueDepsAll).
+func issueJSONEntries(root string, issues []pebbles.Issue) ([]issueJSON, error) {
+	depsByID, err := pebbles.ListIssueDepsAll(root, issueIDsFromIssues(issues))
 	if err != nil {
-		return issueJSON{}, fmt.Errorf("get deps for %s: %w", issue.ID, err)
+		return nil, fmt.Errorf("get deps: %w", err)
 	}
-	return buildIssueJSON(issue, deps), nil
+	entries := make([]issueJSON, 0, len(issues))
+	for _, issue := range issues {
+		entries = append(entries, buildIssueJSON(issue, depsByID[issue.ID]))
+	}
+	return entries, nil
 }
 
 // printJSON marshals the provided payload and writes it to stdout.

@@ -45,7 +45,7 @@ func TestConcurrentWritersAllSucceed(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			<-start
-			event := NewCommentEvent("pb-seed", fmt.Sprintf("note %d", index), "2026-01-01T00:01:00Z")
+			event := NewCommentEvent("pb-seed", fmt.Sprintf("note %d", index), "2026-01-01T00:01:00Z", nil)
 			if err := AppendEvent(root, event); err != nil {
 				errs[index] = fmt.Errorf("append: %w", err)
 				return
@@ -85,7 +85,7 @@ func TestReadDuringWriteReturnsCorrectAnswer(t *testing.T) {
 	go func() {
 		defer close(done)
 		for i := 0; i < writes; i++ {
-			event := NewCommentEvent("pb-read", fmt.Sprintf("note %d", i), "2026-01-01T00:01:00Z")
+			event := NewCommentEvent("pb-read", fmt.Sprintf("note %d", i), "2026-01-01T00:01:00Z", nil)
 			if err := AppendEvent(root, event); err != nil {
 				writeErr = fmt.Errorf("append: %w", err)
 				return
@@ -204,7 +204,7 @@ func TestEnsureCacheIsAtomic(t *testing.T) {
 func TestEnsureCacheChecksStalenessUnderTheWriteLock(t *testing.T) {
 	root := seedProject(t, "pb-lock")
 	// Stale the cache: append an event so the log hash no longer matches.
-	event := NewCommentEvent("pb-lock", "stale it", "2026-01-01T00:01:00Z")
+	event := NewCommentEvent("pb-lock", "stale it", "2026-01-01T00:01:00Z", nil)
 	if err := AppendEvent(root, event); err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestConcurrentRebuildRacersAllSucceed(t *testing.T) {
 	const racers = 8
 	root := seedProject(t, "pb-race")
 	// One hash change stales the cache for every racer at once.
-	event := NewCommentEvent("pb-race", "hash change", "2026-01-01T00:01:00Z")
+	event := NewCommentEvent("pb-race", "hash change", "2026-01-01T00:01:00Z", nil)
 	if err := AppendEvent(root, event); err != nil {
 		t.Fatalf("append: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestManyConcurrentWritersNeverProduceATornLogRead(t *testing.T) {
 		go func(index int) {
 			defer wg.Done()
 			for j := 0; j < perWriter; j++ {
-				event := NewCommentEvent("pb-torn", fmt.Sprintf("w%d-i%d-%s", index, j, strings.Repeat("x", 40)), "2026-01-01T00:01:00Z")
+				event := NewCommentEvent("pb-torn", fmt.Sprintf("w%d-i%d-%s", index, j, strings.Repeat("x", 40)), "2026-01-01T00:01:00Z", nil)
 				if err := AppendEvent(root, event); err != nil {
 					t.Errorf("append: %v", err)
 					return

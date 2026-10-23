@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,6 +21,21 @@ const cacheMetaEventsHash = "events_hash"
 
 // busyTimeoutMillis is how long SQLite waits for a held lock before erroring.
 const busyTimeoutMillis = 5000
+
+// ensureCacheChecks counts EnsureCache calls for the life of the process.
+// See CacheChecks for why the count is worth exposing.
+var ensureCacheChecks atomic.Uint64
+
+// CacheChecks returns how many times this process has called EnsureCache.
+//
+// It exists for tests, and it defends an ALGORITHMIC property that no
+// comparison of command output can see. Every EnsureCache call reads and
+// sha256s the whole events log before it looks at the cache, so a bulk
+// command must make a CONSTANT number of them; one per issue is the exo-5b3
+// N+1 that made `pb list --all --json` 164x slower than the same command's
+// text arm while producing byte-identical output. A test that only compares
+// output passes either way, which is exactly how the N+1 survived review.
+func CacheChecks() uint64 { return ensureCacheChecks.Load() }
 
 // EnsureCache makes the SQLite cache match the events log, rebuilding it when
 // it no longer does.
@@ -64,6 +80,7 @@ const busyTimeoutMillis = 5000
 // unparseable — is fail-loud corruption of the LOG: it returns the error
 // from that second attempt with no further retry.
 func EnsureCache(root string) error {
+	ensureCacheChecks.Add(1)
 	if err := ensureCacheOnce(root); err != nil {
 		if !isCacheCorruption(err) {
 			return err

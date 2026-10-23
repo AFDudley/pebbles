@@ -340,7 +340,7 @@ func buildBeadsCommentEvents(issue beadsIssue, now time.Time, warnings *[]string
 			fmt.Sprintf("comment on %s", issue.ID),
 			warnings,
 		)
-		event := NewCommentEvent(issue.ID, body, commentStamp)
+		event := NewCommentEvent(issue.ID, body, commentStamp, nil)
 		events = append(events, importEvent{Event: event, SortTime: commentTime, Order: 2})
 	}
 	// Capture close/delete reasons as a final comment entry.
@@ -351,7 +351,7 @@ func buildBeadsCommentEvents(issue beadsIssue, now time.Time, warnings *[]string
 			fmt.Sprintf("close reason on %s", issue.ID),
 			warnings,
 		)
-		event := NewCommentEvent(issue.ID, reason, reasonStamp)
+		event := NewCommentEvent(issue.ID, reason, reasonStamp, nil)
 		events = append(events, importEvent{Event: event, SortTime: reasonTime, Order: 2})
 	}
 	return events

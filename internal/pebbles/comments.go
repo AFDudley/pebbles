@@ -56,9 +56,23 @@ func commentFromEvent(db *sql.DB, resolvedID string, event Event) (IssueComment,
 	if body == "" {
 		return IssueComment{}, false, fmt.Errorf("comment event missing body for %s", resolvedEventID)
 	}
+	// Every payload key except "body" is typed metadata (see IssueComment.Payload).
+	// nil rather than an empty map when there is none, so `json:"omitempty"` on
+	// the wire shape keeps the output byte-identical for ordinary comments.
+	var payload map[string]string
+	for key, value := range event.Payload {
+		if key == "body" {
+			continue
+		}
+		if payload == nil {
+			payload = make(map[string]string, len(event.Payload)-1)
+		}
+		payload[key] = value
+	}
 	return IssueComment{
 		IssueID:   resolvedEventID,
 		Body:      body,
 		Timestamp: event.Timestamp,
+		Payload:   payload,
 	}, true, nil
 }
