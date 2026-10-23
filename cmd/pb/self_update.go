@@ -88,7 +88,7 @@ func parseSelfUpdateArgs(args []string) (selfUpdateOptions, error) {
 	fs := flag.NewFlagSet("self-update", flag.ExitOnError)
 	setFlagUsage(fs, selfUpdateHelp)
 	checkOnly := fs.Bool("check", false, "Check for updates without installing")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if fs.NArg() != 0 {
 		return selfUpdateOptions{}, fmt.Errorf("self-update takes no arguments")
 	}

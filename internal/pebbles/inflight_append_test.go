@@ -41,14 +41,14 @@ func appendRaw(t *testing.T, root string, raw []byte) {
 func TestReaderToleratesInFlightFinalAppend(t *testing.T) {
 	root := seedProject(t, "pb-inflight")
 	for i := 0; i < 3; i++ {
-		event := NewCommentEvent("pb-inflight", fmt.Sprintf("note %d", i), "2026-01-01T00:01:00Z")
+		event := NewCommentEvent("pb-inflight", fmt.Sprintf("note %d", i), "2026-01-01T00:01:00Z", nil)
 		if err := AppendEvent(root, event); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 	}
 	// Freeze the in-flight event's bytes, then land only a strict prefix of
 	// its line: the exact observation a reader makes mid-append.
-	inFlight := NewCommentEvent("pb-inflight", "landing right now", "2026-01-01T00:02:00Z")
+	inFlight := NewCommentEvent("pb-inflight", "landing right now", "2026-01-01T00:02:00Z", nil)
 	line, err := json.Marshal(inFlight)
 	if err != nil {
 		t.Fatalf("marshal in-flight event: %v", err)
@@ -105,7 +105,7 @@ func TestReaderToleratesInFlightFinalAppend(t *testing.T) {
 func TestMalformedInteriorLineStaysLoud(t *testing.T) {
 	root := seedProject(t, "pb-corrupt")
 	appendRaw(t, root, []byte("{\"type\":\"comment\",TRUNCATED GARBAGE\n"))
-	event := NewCommentEvent("pb-corrupt", "after the corruption", "2026-01-01T00:01:00Z")
+	event := NewCommentEvent("pb-corrupt", "after the corruption", "2026-01-01T00:01:00Z", nil)
 	if err := AppendEvent(root, event); err != nil {
 		t.Fatalf("append: %v", err)
 	}

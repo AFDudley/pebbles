@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -98,7 +99,7 @@ func runInit(root string, args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	setFlagUsage(fs, initHelp)
 	prefix := fs.String("prefix", "", "Prefix for new issue IDs")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	prefixSet := false
 	fs.Visit(func(flag *flag.Flag) {
 		if flag.Name == "prefix" {
@@ -123,7 +124,7 @@ func runCreate(root string, args []string) {
 	description := fs.String("description", "", "Issue description")
 	issueType := fs.String("type", "task", "Issue type")
 	priority := fs.String("priority", "P2", "Issue priority (P0-P4)")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Ensure the project is initialized and inputs are present.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -176,7 +177,7 @@ func runList(root string, args []string) {
 	staleDays := fs.Int("stale-days", 30, "Days without activity to mark an issue stale")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	blocked := fs.Bool("blocked", false, "Show issues blocked by open dependencies")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Validate the project and requested filters before listing.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -253,16 +254,16 @@ func runList(root string, args []string) {
 	}
 	// JSON output skips column formatting and writes a single payload.
 	if *jsonOut {
-		entries := make([]issueJSON, 0, len(issues))
+		filtered := make([]pebbles.Issue, 0, len(issues))
 		for _, item := range issues {
 			if !filters.matches(item.Issue) {
 				continue
 			}
-			entry, err := issueJSONWithDeps(root, item.Issue)
-			if err != nil {
-				exitError(err)
-			}
-			entries = append(entries, entry)
+			filtered = append(filtered, item.Issue)
+		}
+		entries, err := issueJSONEntries(root, filtered)
+		if err != nil {
+			exitError(err)
 		}
 		if err := printJSON(entries); err != nil {
 			exitError(err)
@@ -283,7 +284,7 @@ func runShow(root string, args []string) {
 	fs := flag.NewFlagSet("show", flag.ExitOnError)
 	setFlagUsage(fs, showHelp)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -349,11 +350,7 @@ func runUpdate(root string, args []string) {
 	fs.Var(&description, "description", "New description")
 	fs.Var(&priority, "priority", "New priority (P0-P4)")
 	fs.Var(&parent, "parent", "Replace parent issue (use \"none\" to clear)")
-	// Support `pb update <id> --status ...` by moving the id to the end.
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
-		args = append(args[1:], args[0])
-	}
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Validate inputs before writing an update event.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -469,7 +466,7 @@ func runUpdate(root string, args []string) {
 func runClose(root string, args []string) {
 	fs := flag.NewFlagSet("close", flag.ExitOnError)
 	setFlagUsage(fs, closeHelp)
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Validate inputs before closing the issues.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -504,7 +501,7 @@ func runClose(root string, args []string) {
 func runReopen(root string, args []string) {
 	fs := flag.NewFlagSet("reopen", flag.ExitOnError)
 	setFlagUsage(fs, reopenHelp)
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	// Validate inputs before reopening the issue.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -530,12 +527,60 @@ func runReopen(root string, args []string) {
 	}
 }
 
+// payloadFlag collects repeatable `--payload key=value` pairs into a payload map.
+//
+// Implements flag.Value, so valueTakingFlags derives it as value-taking and
+// `pb comment <id> --payload k=v` works in either argument order.
+type payloadFlag map[string]string
+
+func (m payloadFlag) String() string {
+	if len(m) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+m[key])
+	}
+	return strings.Join(pairs, ",")
+}
+
+// Set records one key=value pair. A "body" key is refused rather than silently
+// dropped: --body is the only spelling for the one payload key applyComment
+// requires. A missing "=", an empty key, or a duplicate key is an error — a
+// mis-typed record must fail loudly at the CLI boundary rather than be written
+// half-formed and read back later as a valid-looking partial.
+func (m payloadFlag) Set(pair string) error {
+	key, value, found := strings.Cut(pair, "=")
+	if !found {
+		return fmt.Errorf("payload must be key=value, got %q", pair)
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("payload key must not be empty (got %q)", pair)
+	}
+	if key == "body" {
+		return fmt.Errorf("payload key \"body\" is reserved -- use --body")
+	}
+	if _, exists := m[key]; exists {
+		return fmt.Errorf("payload key %q given twice", key)
+	}
+	m[key] = value
+	return nil
+}
+
 // runComment handles pb comment.
 func runComment(root string, args []string) {
 	fs := flag.NewFlagSet("comment", flag.ExitOnError)
 	setFlagUsage(fs, commentHelp)
 	body := fs.String("body", "", "Comment body")
-	_ = fs.Parse(reorderFlags(args, map[string]bool{"--body": true}))
+	payload := payloadFlag{}
+	fs.Var(payload, "payload", "Typed payload key as key=value (repeatable)")
+	parseFlagsAnywhere(fs, args)
 	// Validate inputs before appending a comment event.
 	if err := ensureProject(root); err != nil {
 		exitError(err)
@@ -551,7 +596,7 @@ func runComment(root string, args []string) {
 	if _, _, err := pebbles.GetIssue(root, id); err != nil {
 		exitError(err)
 	}
-	event := pebbles.NewCommentEvent(id, *body, pebbles.NowTimestamp())
+	event := pebbles.NewCommentEvent(id, *body, pebbles.NowTimestamp(), payload)
 	// Append the event and rebuild the cache.
 	if err := pebbles.AppendEvent(root, event); err != nil {
 		exitError(err)
@@ -588,7 +633,7 @@ func runImportBeads(root string, args []string) {
 	dryRun := fs.Bool("dry-run", false, "Preview import without writing")
 	backup := fs.Bool("backup", false, "Backup existing .pebbles directory")
 	force := fs.Bool("force", false, "Overwrite existing .pebbles directory")
-	_ = fs.Parse(reorderFlags(args, map[string]bool{"--from": true, "--prefix": true}))
+	parseFlagsAnywhere(fs, args)
 	// Reject unexpected positional arguments early.
 	if fs.NArg() != 0 {
 		exitError(fmt.Errorf("usage: pb import beads [flags]"))
@@ -645,7 +690,7 @@ func runDep(root string, args []string) {
 		addFlags := flag.NewFlagSet("dep add", flag.ExitOnError)
 		setFlagUsage(addFlags, depAddHelp)
 		depType := addFlags.String("type", pebbles.DepTypeBlocks, "Dependency type (blocks or parent-child)")
-		_ = addFlags.Parse(reorderFlags(args[1:], map[string]bool{"--type": true}))
+		parseFlagsAnywhere(addFlags, args[1:])
 		if addFlags.NArg() != 2 {
 			exitError(fmt.Errorf("usage: pb dep add [--type <type>] <issue> <depends-on>"))
 		}
@@ -654,7 +699,7 @@ func runDep(root string, args []string) {
 		rmFlags := flag.NewFlagSet("dep rm", flag.ExitOnError)
 		setFlagUsage(rmFlags, depRmHelp)
 		depType := rmFlags.String("type", pebbles.DepTypeBlocks, "Dependency type (blocks or parent-child)")
-		_ = rmFlags.Parse(reorderFlags(args[1:], map[string]bool{"--type": true}))
+		parseFlagsAnywhere(rmFlags, args[1:])
 		if rmFlags.NArg() != 2 {
 			exitError(fmt.Errorf("usage: pb dep rm [--type <type>] <issue> <depends-on>"))
 		}
@@ -766,7 +811,7 @@ func runReady(root string, args []string) {
 	fs := flag.NewFlagSet("ready", flag.ExitOnError)
 	setFlagUsage(fs, readyHelp)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -775,13 +820,9 @@ func runReady(root string, args []string) {
 		exitError(err)
 	}
 	if *jsonOut {
-		entries := make([]issueJSON, 0, len(issues))
-		for _, issue := range issues {
-			entry, err := issueJSONWithDeps(root, issue)
-			if err != nil {
-				exitError(err)
-			}
-			entries = append(entries, entry)
+		entries, err := issueJSONEntries(root, issues)
+		if err != nil {
+			exitError(err)
 		}
 		if err := printJSON(entries); err != nil {
 			exitError(err)
@@ -798,7 +839,7 @@ func runReady(root string, args []string) {
 func runPrefix(root string, args []string) {
 	fs := flag.NewFlagSet("prefix", flag.ExitOnError)
 	setFlagUsage(fs, prefixHelp)
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -838,7 +879,7 @@ func runPrefixSet(root, prefix string) {
 func runRename(root string, args []string) {
 	fs := flag.NewFlagSet("rename", flag.ExitOnError)
 	setFlagUsage(fs, renameHelp)
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -878,7 +919,7 @@ func runRenamePrefix(root string, args []string) {
 	setFlagUsage(fs, renamePrefixHelp)
 	full := fs.Bool("full", false, "Rename all issues")
 	open := fs.Bool("open", false, "Rename only open issues")
-	_ = fs.Parse(reorderFlags(args, map[string]bool{}))
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -944,7 +985,7 @@ func runSync(root string, args []string) {
 	fs := flag.NewFlagSet("sync", flag.ExitOnError)
 	setFlagUsage(fs, syncHelp)
 	push := fs.Bool("push", false, "Push after committing")
-	_ = fs.Parse(args)
+	parseFlagsAnywhere(fs, args)
 	if err := ensureProject(root); err != nil {
 		exitError(err)
 	}
@@ -1585,6 +1626,40 @@ func reorderFlags(args []string, flagsWithValues map[string]bool) []string {
 		positionals = append(positionals, arg)
 	}
 	return append(flags, positionals...)
+}
+
+// parseFlagsAnywhere parses args into fs after hoisting flags ahead of the
+// positional arguments, so `pb show <id> --json` behaves the same as
+// `pb show --json <id>`.
+//
+// Go's flag package stops parsing at the first non-flag argument and keeps
+// everything after it as positionals, so a flag written after an issue ID
+// both loses its effect AND inflates NArg — which is why the id itself then
+// reads as missing ("show requires issue id"). pb-12c added reorderFlags for
+// this and wired it into 5 of the 17 subcommands; the rest kept the raw
+// fs.Parse. Route every subcommand through here rather than choosing per
+// command, so the CLI has one argument-order rule instead of two.
+func parseFlagsAnywhere(fs *flag.FlagSet, args []string) {
+	_ = fs.Parse(reorderFlags(args, valueTakingFlags(fs)))
+}
+
+// valueTakingFlags reports which of fs's flags consume the argument that
+// follows them, in both the -name and --name spellings; everything except a
+// boolean flag does. Deriving this from the FlagSet is what keeps it correct.
+// A hand-written map mis-parses any flag it omits — it leaves the flag's
+// VALUE behind as a positional — and every hand-written map at the original
+// call sites omitted the single-dash spelling that Go's flag package accepts
+// just as readily as the double.
+func valueTakingFlags(fs *flag.FlagSet) map[string]bool {
+	withValues := make(map[string]bool)
+	fs.VisitAll(func(f *flag.Flag) {
+		if boolFlag, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && boolFlag.IsBoolFlag() {
+			return
+		}
+		withValues["-"+f.Name] = true
+		withValues["--"+f.Name] = true
+	})
+	return withValues
 }
 
 // printDepTree renders dependency nodes with indentation.

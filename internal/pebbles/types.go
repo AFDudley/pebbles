@@ -24,10 +24,21 @@ type Issue struct {
 }
 
 // IssueComment represents a user-authored comment on an issue.
+//
+// Payload carries the comment event's payload keys OTHER than "body" — the typed
+// extension channel described in
+// docs/decisions/2026-08-07-intake-provenance-is-a-capability-not-a-string.md.
+// Event.Payload is a map decoded non-strictly (events.go decodeEvents), and
+// applyComment validates only "body", so extra keys are inert to the reducer
+// and survive verbatim in the log. This is why a machine-readable record rides
+// a comment payload rather than a NEW event type: applyEvent's default branch
+// (db_apply.go) hard-fails on an unknown type, and that failure propagates
+// through EnsureCache to every verb, permanently and without self-healing.
 type IssueComment struct {
 	IssueID   string
 	Body      string
 	Timestamp string
+	Payload   map[string]string
 }
 
 // IssueHierarchyItem represents an issue with its indentation depth.

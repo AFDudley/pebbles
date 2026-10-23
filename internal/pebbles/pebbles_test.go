@@ -153,13 +153,13 @@ func TestListIssueComments(t *testing.T) {
 	if err := AppendEvent(root, NewCreateEvent(issueID, "Commented", "", "task", "2024-01-07T00:00:00Z", 2)); err != nil {
 		t.Fatalf("append create: %v", err)
 	}
-	if err := AppendEvent(root, NewCommentEvent(issueID, "First note", "2024-01-07T00:00:01Z")); err != nil {
+	if err := AppendEvent(root, NewCommentEvent(issueID, "First note", "2024-01-07T00:00:01Z", nil)); err != nil {
 		t.Fatalf("append comment 1: %v", err)
 	}
 	if err := AppendEvent(root, NewRenameEvent(issueID, renamedID, "2024-01-07T00:00:02Z")); err != nil {
 		t.Fatalf("append rename: %v", err)
 	}
-	if err := AppendEvent(root, NewCommentEvent(issueID, "Second note", "2024-01-07T00:00:03Z")); err != nil {
+	if err := AppendEvent(root, NewCommentEvent(issueID, "Second note", "2024-01-07T00:00:03Z", nil)); err != nil {
 		t.Fatalf("append comment 2: %v", err)
 	}
 	if err := EnsureCache(root); err != nil {

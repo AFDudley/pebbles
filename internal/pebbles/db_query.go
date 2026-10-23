@@ -99,6 +99,36 @@ func loadParentChildDeps(db *sql.DB) (map[string][]string, map[string]bool, erro
 	return childrenByParent, childSet, nil
 }
 
+// loadDepsByIssue loads every dependency edge of one type in a single query
+// and groups them by the issue that holds them. Each list comes back ordered
+// by depends_on_id, which is the order getDeps returns for a single issue, so
+// a lookup here is interchangeable with a getDeps call for that issue.
+func loadDepsByIssue(db *sql.DB, depType string) (map[string][]string, error) {
+	depType = NormalizeDepType(depType)
+	rows, err := db.Query(
+		"SELECT issue_id, depends_on_id FROM deps WHERE dep_type = ? ORDER BY issue_id, depends_on_id",
+		depType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list deps: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	depsByIssue := make(map[string][]string)
+	// Collect edges under the issue that declares them.
+	for rows.Next() {
+		var issueID string
+		var dependsOn string
+		if err := rows.Scan(&issueID, &dependsOn); err != nil {
+			return nil, fmt.Errorf("scan dep: %w", err)
+		}
+		depsByIssue[issueID] = append(depsByIssue[issueID], dependsOn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deps rows: %w", err)
+	}
+	return depsByIssue, nil
+}
+
 // buildIssueHierarchy orders issues by parent-child depth with stable fallbacks.
 func buildIssueHierarchy(issues []Issue, childrenByParent map[string][]string, childSet map[string]bool) []IssueHierarchyItem {
 	issueByID := make(map[string]Issue, len(issues))
@@ -169,6 +199,55 @@ func GetIssue(root, id string) (Issue, []string, error) {
 		return Issue{}, nil, err
 	}
 	return issue, deps, nil
+}
+
+// ListIssueDepsAll returns the blocking dependencies of every requested issue,
+// keyed by the ID the caller passed in. It is the bulk form of calling
+// GetIssue once per ID and keeping only the deps: same rename resolution, same
+// dep type, same depends_on_id ordering, and the same nil result for an issue
+// with no dependencies.
+//
+// The bulk form exists because the per-issue form is an N+1 over the EVENTS
+// LOG, not over SQLite. Every GetIssue calls EnsureCache, which reads and
+// sha256s the whole of events.jsonl before it looks at the cache, and opens
+// its own connection. Rendering `pb list --all --json` that way re-read a
+// 16MB log once per issue: 19.7s for 1,468 issues, against 0.08s for the same
+// command's text arm on the same warm cache (exo-5b3). Here the log is read
+// once, whatever the issue count.
+func ListIssueDepsAll(root string, ids []string) (map[string][]string, error) {
+	if err := EnsureCache(root); err != nil {
+		return nil, err
+	}
+	db, err := openDB(DBPath(root))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+	return listIssueDepsAll(db, ids)
+}
+
+// listIssueDepsAll projects one pass over the deps table onto the requested
+// IDs using the provided DB connection.
+func listIssueDepsAll(db *sql.DB, ids []string) (map[string][]string, error) {
+	depsByIssue, err := loadDepsByIssue(db, DepTypeBlocks)
+	if err != nil {
+		return nil, err
+	}
+	deps := make(map[string][]string, len(ids))
+	for _, id := range ids {
+		// Skip repeats so a duplicated ID costs no extra rename lookup.
+		if _, done := deps[id]; done {
+			continue
+		}
+		// Resolve through renames exactly as GetIssue does: an ID that was
+		// renamed away must yield its successor's dependencies, not none.
+		resolvedID, err := resolveIssueID(db, id)
+		if err != nil {
+			return nil, err
+		}
+		deps[id] = depsByIssue[resolvedID]
+	}
+	return deps, nil
 }
 
 // ListReadyIssues returns issues that have no open blockers.

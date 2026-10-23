@@ -214,10 +214,22 @@ Usage:
   pb comment <id> --body "Next steps: add retry to client"
 
 Flags:
-  --body <text>   Required. Example: --body "Meeting notes..."
+  --body <text>          Required. Example: --body "Meeting notes..."
+  --payload <key=value>  Repeatable. Adds a TYPED key to the comment event's
+                         payload alongside the body. Example:
+                         --payload exophial.kind=intake_capture
 
 Details:
   - Wrap the body in quotes if it contains spaces or newlines.
+  - --payload values are JSON strings only. Nested objects and numbers are not
+    representable: the event log stores payloads as string->string, and a
+    non-string value makes the line unparseable AND unrecoverable (it is not
+    treated as cache corruption, so it is never repaired by a rebuild). Encode
+    structure as flat dotted keys, or as one JSON-encoded string value.
+  - The reducer ignores every payload key except "body", so typed keys are inert
+    to issue state; they are read back via 'pb show --json' (comments[].payload)
+    and 'pb log --json'. Older pb binaries simply do not display them.
+  - "body" is reserved as a --payload key; use --body.
 
 Workflows:
   - Record progress: pb comment <id> --body "Implemented parser"

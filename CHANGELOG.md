@@ -13,6 +13,23 @@ The format is based on Keep a Changelog, and this project follows SemVer.
 
 
 ### Fixed
+- `pb list --json` and `pb ready --json` no longer re-read the whole events
+  log once per issue. Both loaded each issue's dependencies through
+  `GetIssue`, whose `EnsureCache` reads and sha256s the entire log before it
+  touches the cache; deps now come from one batched `ListIssueDepsAll` pass.
+  On a 13,684-event, 16MB log `pb list --all --json` goes from 19.7s to 0.11s
+  for byte-identical output, and `pb ready --json` from 3.0s to 0.07s
+  (exo-5b3).
+- Flags written after a positional argument are honoured by every subcommand
+  rather than five of them. Go's `flag` package stops parsing at the first
+  positional, so `pb show <id> --json` dropped `--json` and reported
+  "show requires issue id"; `reorderFlags` fixed that in pb-12c but was wired
+  into only `comment`, `import beads`, `dep add`, `dep rm` and `rename-prefix`.
+- A value flag in its single-dash spelling no longer loses its value.
+  `pb comment <id> -body text` silently wrote no comment and
+  `pb dep add <a> <b> -type parent-child` failed outright, because each call
+  site hand-wrote the set of value-taking flags and listed only the
+  double-dash form. The set is now derived from the FlagSet.
 - Concurrent access no longer errors with `database is locked (SQLITE_BUSY)`.
   SQLite is opened with a 5s `busy_timeout`, so a contended read or write waits
   for the lock instead of failing immediately (so-b08).
